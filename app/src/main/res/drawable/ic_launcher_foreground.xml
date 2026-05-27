@@ -1,0 +1,87 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Glowing Background Chat Bubble (Soft glow effect) -->
+    <path
+        android:pathData="M54,22 C35,22 20,34.5 20,50 C20,58.8 26.2,66.4 35.8,70.9 L31.3,89.3 C31.1,90.2 32.1,90.8 32.8,90.3 L52.2,79.5 C52.8,79.5 53.4,79.5 54,79.5 C73,79.5 88,67 88,50 C88,34.5 73,22 54,22 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="20"
+                android:startY="22"
+                android:endX="88"
+                android:endY="79.5"
+                android:type="linear">
+                <!-- Glowing cyan/green with low opacity for the glow effect -->
+                <item android:color="#2200E5FF" android:offset="0.0"/>
+                <item android:color="#2233B35A" android:offset="1.0"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Main Chat Bubble Border/Stroke (2.5dp width) and dark glass background -->
+    <path
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M54,24 C37.4,24 24,35.2 24,49 C24,56.8 29.5,63.6 38,67.6 L34,84 L51.2,74 C52.1,74 53,74 54,74 C70.6,74 84,62.8 84,49 C84,35.2 70.6,24 54,24 Z">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="24"
+                android:startY="24"
+                android:endX="84"
+                android:endY="84"
+                android:type="linear">
+                <item android:color="#00E5FF" android:offset="0.0"/>
+                <item android:color="#33B35A" android:offset="1.0"/>
+            </gradient>
+        </aapt:attr>
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="24"
+                android:startY="24"
+                android:endX="84"
+                android:endY="84"
+                android:type="linear">
+                <!-- Dark glassmorphic background inside bubble -->
+                <item android:color="#E011121B" android:offset="0.0"/>
+                <item android:color="#E01A1A2E" android:offset="1.0"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Weibo Stylized Eye - Outer Contour (Glowing white/cyan) -->
+    <path
+        android:pathData="M38,49 C38,49 46,39 54,39 C62,39 70,49 70,49 C70,49 62,59 54,59 C46,59 38,49 38,49 Z"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:fillColor="#00000000" />
+
+    <!-- Weibo Stylized Eye - Pupil -->
+    <path
+        android:pathData="M54,44 C56.76,44 59,46.24 59,49 C59,51.76 56.76,54 54,54 C51.24,54 49,51.76 49,49 C49,46.24 51.24,44 54,44 Z"
+        android:fillColor="#00E5FF" />
+
+    <!-- Weibo Stylized Eye - Pupil Highlight -->
+    <path
+        android:pathData="M56,46 C56.83,46 57.5,46.67 57.5,47.5 C57.5,48.33 56.83,49 56,49 C55.17,49 54.5,48.33 54.5,47.5 C54.5,46.67 55.17,46 56,46 Z"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Weibo Stylized Eye - Antenna/Waves (Inner) -->
+    <path
+        android:pathData="M63,33 C67.5,35 71,39 72,43.5"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeColor="#33B35A" />
+
+    <!-- Weibo Stylized Eye - Antenna/Waves (Outer) -->
+    <path
+        android:pathData="M58.5,29 C66,31.5 72,37.5 74.5,45"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeColor="#00E5FF" />
+
+</vector>

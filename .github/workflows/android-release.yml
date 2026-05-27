@@ -1,0 +1,60 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-arm64:
+    name: Build arm64 APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Decode release keystore
+        env:
+          WEIBOTOY_RELEASE_KEYSTORE_BASE64: ${{ secrets.WEIBOTOY_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$WEIBOTOY_RELEASE_KEYSTORE_BASE64"
+          mkdir -p "$RUNNER_TEMP/keystore"
+          echo "$WEIBOTOY_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/keystore/weiboToy-release.jks"
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: Build signed arm64 release APK
+        env:
+          WEIBOTOY_RELEASE_STORE_FILE: ${{ runner.temp }}/keystore/weiboToy-release.jks
+          WEIBOTOY_RELEASE_STORE_PASSWORD: ${{ secrets.WEIBOTOY_RELEASE_STORE_PASSWORD }}
+          WEIBOTOY_RELEASE_KEY_ALIAS: ${{ secrets.WEIBOTOY_RELEASE_KEY_ALIAS }}
+          WEIBOTOY_RELEASE_KEY_PASSWORD: ${{ secrets.WEIBOTOY_RELEASE_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weiboToy-arm64-release
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk

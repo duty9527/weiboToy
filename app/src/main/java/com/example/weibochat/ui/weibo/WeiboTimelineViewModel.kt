@@ -1,0 +1,397 @@
+package com.example.weibochat.ui.weibo
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.weibochat.data.DataRepository
+import com.example.weibochat.data.DEFAULT_WEIBO_TIMELINE_LIST_ID
+import com.example.weibochat.data.WeiboTimelineStatus
+import com.example.weibochat.data.WeiboComment
+import com.example.weibochat.data.WeiboRepost
+import com.example.weibochat.data.WeiboAttitude
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+
+sealed interface TimelineUiState {
+    object Loading : TimelineUiState
+    data class Success(val statuses: List<WeiboTimelineStatus>) : TimelineUiState
+    data class Error(val message: String) : TimelineUiState
+}
+
+class WeiboTimelineViewModel(
+    private val repository: DataRepository,
+    private val listId: String = DEFAULT_WEIBO_TIMELINE_LIST_ID
+) : ViewModel() {
+
+    private val _scrollToTopEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val scrollToTopEvents = _scrollToTopEvents.asSharedFlow()
+
+    fun triggerScrollToTopAndRefresh() {
+        _scrollToTopEvents.tryEmit(Unit)
+        refresh()
+    }
+
+    private val _uiState = MutableStateFlow<TimelineUiState>(TimelineUiState.Loading)
+    val uiState: StateFlow<TimelineUiState> = _uiState.asStateFlow()
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _isLoadingMore = MutableStateFlow(false)
+    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
+
+    private val allStatuses = mutableListOf<WeiboTimelineStatus>()
+    private var nextCursor: Long? = null
+    private var hasMore = true
+    val canLoadMore: Boolean
+        get() = hasMore && nextCursor != null
+
+    init {
+    }
+
+    fun refresh() {
+        if (_isRefreshing.value) return
+        _isRefreshing.value = true
+        hasMore = true
+        if (_uiState.value !is TimelineUiState.Success) {
+            _uiState.value = TimelineUiState.Loading
+        }
+        loadTimelinePage(maxId = null, append = false)
+    }
+
+    fun loadMore() {
+        if (_isLoadingMore.value || _uiState.value !is TimelineUiState.Success || !hasMore || nextCursor == null) return
+
+        _isLoadingMore.value = true
+        loadTimelinePage(maxId = nextCursor, append = true)
+    }
+
+    private fun loadTimelinePage(maxId: Long?, append: Boolean) {
+        viewModelScope.launch {
+            val response = repository.fetchFriendsTimeline(
+                listId = listId,
+                maxId = maxId
+            )
+            val statuses = response?.statuses.orEmpty()
+
+            if (append) {
+                val newStatuses = statuses.filter { new ->
+                    allStatuses.none { (it.idstr ?: it.id?.toString()) == (new.idstr ?: new.id?.toString()) }
+                }
+                allStatuses.addAll(newStatuses)
+                hasMore = newStatuses.isNotEmpty()
+            } else {
+                allStatuses.clear()
+                allStatuses.addAll(statuses.distinctBy { it.idstr ?: it.id })
+                hasMore = allStatuses.isNotEmpty()
+            }
+
+            if (statuses.isNotEmpty()) {
+                nextCursor = response?.max_id
+            }
+
+            _isRefreshing.value = false
+            _isLoadingMore.value = false
+
+            if (allStatuses.isNotEmpty()) {
+                _uiState.value = TimelineUiState.Success(allStatuses.toList())
+            } else {
+                _uiState.value = TimelineUiState.Error("没有拿到最新微博，请确认登录状态后重试")
+            }
+        }
+    }
+
+    // Detail Page Tabs
+    enum class DetailTab {
+        REPOST, COMMENT, LIKE
+    }
+
+    data class DetailNotice(
+        val message: String,
+        val actionUrl: String? = null
+    )
+
+    data class ChildCommentsUiState(
+        val root: WeiboComment,
+        val replies: List<WeiboComment> = emptyList(),
+        val totalNumber: Int = 0,
+        val isLoading: Boolean = false,
+        val canLoadMore: Boolean = false
+    )
+
+    private val _detailTab = MutableStateFlow(DetailTab.COMMENT)
+    val detailTab: StateFlow<DetailTab> = _detailTab.asStateFlow()
+
+    private val _detailComments = MutableStateFlow<List<WeiboComment>>(emptyList())
+    val detailComments: StateFlow<List<WeiboComment>> = _detailComments.asStateFlow()
+
+    private val _detailCommentNotice = MutableStateFlow<DetailNotice?>(null)
+    val detailCommentNotice: StateFlow<DetailNotice?> = _detailCommentNotice.asStateFlow()
+
+    private val _childCommentsUiState = MutableStateFlow<ChildCommentsUiState?>(null)
+    val childCommentsUiState: StateFlow<ChildCommentsUiState?> = _childCommentsUiState.asStateFlow()
+
+    private val _detailReposts = MutableStateFlow<List<WeiboRepost>>(emptyList())
+    val detailReposts: StateFlow<List<WeiboRepost>> = _detailReposts.asStateFlow()
+
+    private val _detailAttitudes = MutableStateFlow<List<WeiboAttitude>>(emptyList())
+    val detailAttitudes: StateFlow<List<WeiboAttitude>> = _detailAttitudes.asStateFlow()
+
+    private val _isDetailCommentsLoading = MutableStateFlow(false)
+    val isDetailCommentsLoading: StateFlow<Boolean> = _isDetailCommentsLoading.asStateFlow()
+
+    private val _isDetailRepostsLoading = MutableStateFlow(false)
+    val isDetailRepostsLoading: StateFlow<Boolean> = _isDetailRepostsLoading.asStateFlow()
+
+    private val _isDetailAttitudesLoading = MutableStateFlow(false)
+    val isDetailAttitudesLoading: StateFlow<Boolean> = _isDetailAttitudesLoading.asStateFlow()
+
+    private var commentMaxId: Long? = null
+    private var commentMaxIdType: Int = 0
+    private var childCommentMaxId: Long = 0L
+    private var childCommentMaxIdType: Int = 0
+    private var repostPage: Int = 1
+    private var attitudePage: Int = 1
+
+    private var commentHasMore = true
+    private var repostHasMore = true
+    private var attitudeHasMore = true
+
+    val canLoadMoreComments: Boolean get() = commentHasMore
+    val canLoadMoreReposts: Boolean get() = repostHasMore
+    val canLoadMoreAttitudes: Boolean get() = attitudeHasMore
+
+    private var activeDetailStatusId: String? = null
+
+    fun selectDetailTab(tab: DetailTab) {
+        _detailTab.value = tab
+        val statusId = activeDetailStatusId
+        if (statusId != null) {
+            when (tab) {
+                DetailTab.COMMENT -> if (_detailComments.value.isEmpty()) loadComments(statusId, reset = true)
+                DetailTab.REPOST -> if (_detailReposts.value.isEmpty()) loadReposts(statusId, reset = true)
+                DetailTab.LIKE -> if (_detailAttitudes.value.isEmpty()) loadAttitudes(statusId, reset = true)
+            }
+        }
+    }
+
+    fun openStatusDetail(statusId: String) {
+        activeDetailStatusId = statusId
+        _detailTab.value = DetailTab.COMMENT
+
+        _detailComments.value = emptyList()
+        _detailReposts.value = emptyList()
+        _detailAttitudes.value = emptyList()
+        _childCommentsUiState.value = null
+
+        commentMaxId = null
+        commentMaxIdType = 0
+        repostPage = 1
+        attitudePage = 1
+
+        commentHasMore = true
+        repostHasMore = true
+        attitudeHasMore = true
+
+        loadComments(statusId, reset = true)
+    }
+
+    fun loadMoreComments() {
+        val statusId = activeDetailStatusId ?: return
+        if (_isDetailCommentsLoading.value || !commentHasMore) return
+        loadComments(statusId, reset = false)
+    }
+
+    fun loadMoreReposts() {
+        val statusId = activeDetailStatusId ?: return
+        if (_isDetailRepostsLoading.value || !repostHasMore) return
+        loadReposts(statusId, reset = false)
+    }
+
+    fun loadMoreAttitudes() {
+        val statusId = activeDetailStatusId ?: return
+        if (_isDetailAttitudesLoading.value || !attitudeHasMore) return
+        loadAttitudes(statusId, reset = false)
+    }
+
+    fun openCommentChildren(root: WeiboComment) {
+        val totalNumber = root.total_number ?: root.comments.orEmpty().size
+        childCommentMaxId = 0L
+        childCommentMaxIdType = 0
+        _childCommentsUiState.value = ChildCommentsUiState(
+            root = root,
+            replies = emptyList(),
+            totalNumber = totalNumber,
+            isLoading = true,
+            canLoadMore = false
+        )
+        loadCommentChildren(root, reset = true)
+    }
+
+    fun closeCommentChildren() {
+        _childCommentsUiState.value = null
+    }
+
+    fun loadMoreCommentChildren() {
+        val state = _childCommentsUiState.value ?: return
+        if (state.isLoading || !state.canLoadMore) return
+        loadCommentChildren(state.root, reset = false)
+    }
+
+    private fun loadComments(statusId: String, reset: Boolean) {
+        if (reset) {
+            commentMaxId = null
+            commentMaxIdType = 0
+            commentHasMore = true
+            _detailCommentNotice.value = null
+        }
+        _isDetailCommentsLoading.value = true
+        viewModelScope.launch {
+            val response = repository.fetchWeiboComments(statusId, commentMaxId, commentMaxIdType)
+            if (response?.ok == 1) {
+                val list = response.data?.data.orEmpty()
+                if (reset) {
+                    _detailComments.value = list
+                } else {
+                    _detailComments.value = _detailComments.value + list
+                }
+                commentMaxId = response.data?.max_id
+                commentMaxIdType = response.data?.max_id_type ?: 0
+                commentHasMore = list.isNotEmpty() && commentMaxId != null && commentMaxId != 0L
+                _detailCommentNotice.value = null
+            } else {
+                commentHasMore = false
+                _detailCommentNotice.value = buildCommentNotice(response)
+            }
+            _isDetailCommentsLoading.value = false
+        }
+    }
+
+    private fun buildCommentNotice(response: com.example.weibochat.data.WeiboCommentsResponse?): DetailNotice {
+        val actionUrl = response?.url?.takeIf { it.isNotBlank() }
+        if (response?.ok == -100 || actionUrl?.contains("/captcha/") == true) {
+            return DetailNotice("微博要求完成验证后才能查看评论", actionUrl)
+        }
+
+        val message = response?.msg
+            ?.takeIf { it.isNotBlank() }
+            ?: "评论接口没有返回可用数据"
+        return DetailNotice(message, actionUrl)
+    }
+
+    private fun loadCommentChildren(root: WeiboComment, reset: Boolean) {
+        val rootId = root.id ?: return
+        val currentState = _childCommentsUiState.value ?: return
+        _childCommentsUiState.value = currentState.copy(isLoading = true)
+        viewModelScope.launch {
+            val response = repository.fetchWeiboCommentChildren(rootId, childCommentMaxId, childCommentMaxIdType)
+            val currentReplies = if (reset) emptyList() else _childCommentsUiState.value?.replies.orEmpty()
+            if (response?.ok == 1) {
+                val pageReplies = response.data.orEmpty()
+                val newReplies = pageReplies.filter { reply ->
+                    val replyId = reply.id
+                    replyId == null || currentReplies.none { it.id == replyId }
+                }
+                val replies = currentReplies + newReplies
+                childCommentMaxId = response.max_id ?: 0L
+                childCommentMaxIdType = response.max_id_type ?: 0
+                _childCommentsUiState.value = currentState.copy(
+                    replies = replies,
+                    totalNumber = response.total_number ?: currentState.totalNumber,
+                    isLoading = false,
+                    canLoadMore = childCommentMaxId > 0L
+                )
+            } else {
+                _childCommentsUiState.value = currentState.copy(
+                    replies = currentReplies,
+                    isLoading = false,
+                    canLoadMore = false
+                )
+            }
+        }
+    }
+
+    private fun loadReposts(statusId: String, reset: Boolean) {
+        if (reset) {
+            repostPage = 1
+            repostHasMore = true
+        }
+        _isDetailRepostsLoading.value = true
+        viewModelScope.launch {
+            val response = repository.fetchWeiboReposts(statusId, repostPage)
+            if (response?.ok == 1) {
+                val list = response.data?.data.orEmpty()
+                if (reset) {
+                    _detailReposts.value = list
+                } else {
+                    _detailReposts.value = _detailReposts.value + list
+                }
+                repostPage++
+                repostHasMore = list.isNotEmpty()
+            } else {
+                repostHasMore = false
+            }
+            _isDetailRepostsLoading.value = false
+        }
+    }
+
+    private fun loadAttitudes(statusId: String, reset: Boolean) {
+        if (reset) {
+            attitudePage = 1
+            attitudeHasMore = true
+        }
+        _isDetailAttitudesLoading.value = true
+        viewModelScope.launch {
+            val response = repository.fetchWeiboAttitudes(statusId, attitudePage)
+            if (response?.ok == 1) {
+                val list = response.data?.data.orEmpty()
+                if (reset) {
+                    _detailAttitudes.value = list
+                } else {
+                    _detailAttitudes.value = _detailAttitudes.value + list
+                }
+                attitudePage++
+                attitudeHasMore = list.isNotEmpty()
+            } else {
+                attitudeHasMore = false
+            }
+            _isDetailAttitudesLoading.value = false
+        }
+    }
+
+    fun toggleLikeStatus(statusId: String) {
+        viewModelScope.launch {
+            val index = allStatuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
+            if (index != -1) {
+                val oldStatus = allStatuses[index]
+                val currentlyLiked = oldStatus.liked == true
+                val newLiked = !currentlyLiked
+                val countChange = if (newLiked) 1 else -1
+                val newCount = ((oldStatus.attitudes_count ?: 0) + countChange).coerceAtLeast(0)
+                val newStatus = oldStatus.copy(
+                    liked = newLiked,
+                    attitudes_count = newCount
+                )
+                allStatuses[index] = newStatus
+                _uiState.value = TimelineUiState.Success(allStatuses.toList())
+
+                val success = if (newLiked) {
+                    repository.likeWeiboStatus(statusId)
+                } else {
+                    repository.unlikeWeiboStatus(statusId)
+                }
+
+                if (!success) {
+                    val revertIndex = allStatuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
+                    if (revertIndex != -1) {
+                        allStatuses[revertIndex] = oldStatus
+                        _uiState.value = TimelineUiState.Success(allStatuses.toList())
+                    }
+                }
+            }
+        }
+    }
+}

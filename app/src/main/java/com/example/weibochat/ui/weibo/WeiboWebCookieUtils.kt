@@ -39,6 +39,43 @@ internal fun collectWeiboWebViewCookies(): String {
     return cookies.map { "${it.key}=${it.value}" }.joinToString("; ")
 }
 
+internal fun mergeCookieStrings(existingCookieString: String, newCookieString: String): String {
+    val cookies = linkedMapOf<String, String>()
+    listOf(existingCookieString, newCookieString).forEach { cookieString ->
+        cookieString
+            .split(";")
+            .map { it.trim() }
+            .filter { it.contains("=") }
+            .forEach { cookie ->
+                val parts = cookie.split("=", limit = 2)
+                cookies[parts[0].trim()] = parts[1].trim()
+            }
+    }
+    return cookies.map { "${it.key}=${it.value}" }.joinToString("; ")
+}
+
+internal fun hasWeiboAuthCookie(cookieString: String): Boolean {
+    val names = cookieString
+        .split(";")
+        .mapNotNull { cookie ->
+            cookie.trim()
+                .takeIf { it.contains("=") }
+                ?.substringBefore("=")
+                ?.trim()
+        }
+        .toSet()
+    return "SUB" in names || "SSOLoginState" in names
+}
+
+internal fun isWeiboLoginUrl(url: String?): Boolean {
+    val host = Uri.parse(url ?: return false).host ?: return false
+    return host == "login.sina.com.cn" ||
+        host.endsWith(".passport.weibo.com") ||
+        host.endsWith(".passport.weibo.cn") ||
+        host.contains("passport") ||
+        host.contains("login")
+}
+
 internal fun isAllowedWeiboHost(host: String): Boolean {
     val normalized = Uri.parse("https://$host").host ?: return false
     return normalized == "weibo.com" ||

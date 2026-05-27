@@ -99,7 +99,10 @@ class WeiboTimelineViewModel(
             if (allStatuses.isNotEmpty()) {
                 _uiState.value = TimelineUiState.Success(allStatuses.toList())
             } else {
-                _uiState.value = TimelineUiState.Error("没有拿到最新微博，请确认登录状态后重试")
+                _uiState.value = TimelineUiState.Error(
+                    response?.msg?.takeIf { it.isNotBlank() }
+                        ?: "没有拿到最新微博，请确认登录状态后重试"
+                )
             }
         }
     }

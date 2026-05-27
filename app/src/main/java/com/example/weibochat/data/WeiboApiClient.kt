@@ -353,7 +353,8 @@ data class WeiboTimelineResponse(
     val max_id: Long?,
     val total_number: Int?,
     val ok: Int? = null,
-    val url: String? = null
+    val url: String? = null,
+    val msg: String? = null
 )
 
 private data class WeiboMobileFriendsTimelineResponse(
@@ -554,7 +555,7 @@ class WeiboApiClient(private val context: Context) {
         val request = Request.Builder()
             .url(url)
             .get()
-            .addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .addHeader("User-Agent", WEIBO_DESKTOP_USER_AGENT)
             .addHeader("Referer", "https://weibo.com/")
             .build()
         try {
@@ -570,7 +571,7 @@ class WeiboApiClient(private val context: Context) {
                         val cRequest = Request.Builder()
                             .url(cUrl)
                             .get()
-                            .addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36")
+                            .addHeader("User-Agent", WEIBO_DESKTOP_USER_AGENT)
                             .addHeader("Referer", "https://weibo.com/")
                             .build()
                         try {
@@ -582,6 +583,8 @@ class WeiboApiClient(private val context: Context) {
                         }
                     }
                 }
+
+                hydrateTimelineMobileSession()
                 
                 val flatCookie = cookieJar.getFlatCookieString()
                 val finalCookie = if (loginResponse.uid != null) {
@@ -960,7 +963,16 @@ class WeiboApiClient(private val context: Context) {
             attempts++
             try {
                 cookieJar.seedCookies(cookie)
-                hydrateTimelineMobileSession()
+                if (!hydrateTimelineMobileSession()) {
+                    return@withContext WeiboTimelineResponse(
+                        statuses = emptyList(),
+                        since_id = null,
+                        max_id = null,
+                        total_number = null,
+                        ok = -100,
+                        msg = "微博登录态已失效，请重新登录后再试"
+                    )
+                }
 
                 val urlBuilder = "https://m.weibo.cn/feed/friends".toHttpUrlOrNull()?.newBuilder()
                 if (urlBuilder != null) {
@@ -1153,7 +1165,7 @@ class WeiboApiClient(private val context: Context) {
         }
     }
 
-    private fun hydrateTimelineMobileSession() {
+    private fun hydrateTimelineMobileSession(): Boolean {
         val pageUrl = "https://m.weibo.cn/"
         val request = Request.Builder()
             .url(pageUrl)
@@ -1171,14 +1183,18 @@ class WeiboApiClient(private val context: Context) {
                     val location = response.header("Location").orEmpty()
                     if (location.contains("passport") || location.contains("login") || location.contains("signin")) {
                         android.util.Log.w("WeiboApiClient", "Timeline mobile page session request redirected to login page: $location")
+                        return false
                     }
                 } else if (!response.isSuccessful) {
                     android.util.Log.w("WeiboApiClient", "Timeline mobile page session request failed: code=$code, url=$pageUrl")
+                    return false
                 }
             }
         } catch (e: Exception) {
             android.util.Log.w("WeiboApiClient", "Timeline mobile page session request failed", e)
+            return false
         }
+        return true
     }
 
     suspend fun fetchWeiboComments(

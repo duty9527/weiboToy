@@ -47,11 +47,11 @@ fun WeiboMobileCookieSync(
     }
 
     AndroidView(
-        modifier = modifier.size(0.dp),
+        modifier = modifier.size(1.dp),
         factory = { context ->
             seedWeiboWebViewCookies(repository.getAllCookies())
             WebView(context).apply {
-                layoutParams = android.view.ViewGroup.LayoutParams(0, 0)
+                layoutParams = android.view.ViewGroup.LayoutParams(1, 1)
                 visibility = android.view.View.INVISIBLE
                 setBackgroundColor(0) // transparent
                 
@@ -69,10 +69,20 @@ fun WeiboMobileCookieSync(
                     override fun onPageFinished(view: WebView?, url: String?) {
                         CookieManager.getInstance().flush()
                         mainHandler.postDelayed({
-                            val mergedCookie = collectWeiboWebViewCookies()
-                            if (mergedCookie.isBlank()) return@postDelayed
+                            if (isWeiboLoginUrl(url)) {
+                                android.util.Log.w("WeiboMobileCookieSync", "Skip cookie sync from login page: $url")
+                                return@postDelayed
+                            }
+
+                            val webViewCookie = collectWeiboWebViewCookies()
+                            if (webViewCookie.isBlank()) return@postDelayed
+                            if (!hasWeiboAuthCookie(webViewCookie)) {
+                                android.util.Log.w("WeiboMobileCookieSync", "Skip cookie sync because WebView has no auth cookie")
+                                return@postDelayed
+                            }
 
                             val (_, groupId) = repository.getCredentials()
+                            val mergedCookie = mergeCookieStrings(repository.getAllCookies(), webViewCookie)
                             repository.saveCredentials(mergedCookie, groupId)
                             if (!hasReported.value) {
                                 hasReported.value = true

@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
+import com.example.weibochat.data.BlockedKeywordRule
 import com.example.weibochat.data.Message
 import com.example.weibochat.data.WeiboContact
 import com.example.weibochat.data.WeiboTimelineResponse
@@ -73,4 +74,7 @@ private class FakeMyModelRepository : DataRepository {
   override suspend fun loadMoreTimeline(): Result<Unit> = Result.success(Unit)
   override fun saveLastViewedWeibo(statusId: String, index: Int, offset: Int) {}
   override fun getLastViewedWeibo(): Triple<String, Int, Int>? = null
+  override suspend fun loadOlderLocalMessages(groupId: String, beforeTimestamp: String, limit: Int): List<Message> = emptyList()
+  override fun getBlockedKeywordRules(): List<BlockedKeywordRule> = emptyList()
+  override fun saveBlockedKeywordRules(rules: List<BlockedKeywordRule>) {}
 }

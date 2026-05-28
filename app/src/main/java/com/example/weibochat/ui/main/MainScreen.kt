@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -521,7 +523,7 @@ fun MainScreen(
                 onDismissRequest = { showSettingsDialog = false },
                 title = { Text("群聊设置与工具", color = Color.White) },
                 text = {
-                    Column(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
                         Text("屏蔽关键字:", color = TextGrey, fontSize = 12.sp)
                         Spacer(modifier = Modifier.height(4.dp))
 

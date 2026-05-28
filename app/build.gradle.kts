@@ -2,6 +2,7 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
   alias(libs.plugins.kotlin.serialization)
+  alias(libs.plugins.ksp)
 }
 
 val releaseStoreFile = System.getenv("WEIBOTOY_RELEASE_STORE_FILE")
@@ -124,4 +125,12 @@ dependencies {
 
   // Coil for network image rendering
   implementation("io.coil-kt:coil-compose:2.6.0")
+
+  // Room
+  implementation(libs.androidx.room.runtime)
+  implementation(libs.androidx.room.ktx)
+  ksp(libs.androidx.room.compiler)
+
+  // Encrypted SharedPreferences
+  implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }

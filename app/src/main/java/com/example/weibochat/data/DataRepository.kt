@@ -1,9 +1,7 @@
 package com.example.weibochat.data
 
-import android.content.ContentValues
 import android.content.Context
 import android.content.SharedPreferences
-import android.database.sqlite.SQLiteDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,12 +34,15 @@ interface DataRepository {
     fun getMobileCookie(): String
     fun getAllCookies(): String
     suspend fun fetchOlderMessages(maxMid: Long): Boolean
+    suspend fun loadOlderLocalMessages(groupId: String, beforeTimestamp: String, limit: Int = 500): List<Message>
     suspend fun fetchContacts(): List<WeiboContact>
     fun setActiveGroupId(groupId: String?)
     fun getActiveGroupId(): String?
     fun saveBlockedKeywords(keywords: String)
     fun getBlockedKeywordsString(): String
     fun getBlockedKeywordsList(): List<String>
+    fun getBlockedKeywordRules(): List<BlockedKeywordRule>
+    fun saveBlockedKeywordRules(rules: List<BlockedKeywordRule>)
     fun saveBlockedUsers(users: String)
     fun getBlockedUsersString(): String
     fun getBlockedUsersList(): List<String>
@@ -74,9 +75,17 @@ interface DataRepository {
 }
 
 class DefaultDataRepository(private val context: Context) : DataRepository {
-    private val dbHelper = MessageDbHelper(context)
+    companion object {
+        private const val MESSAGE_LOAD_LIMIT = 5000
+    }
+
+    private val database = WeiboDatabase.create(context)
+    private val messageDao = database.messageDao()
+    private val weiboDao = database.weiboDao()
     private val apiClient = WeiboApiClient(context)
-    private val sharedPrefs: SharedPreferences = context.getSharedPreferences("weibo_prefs", Context.MODE_PRIVATE)
+    private val sharedPrefs: SharedPreferences = migrateToEncryptedPrefs(
+        context, "weibo_prefs", "weibo_encrypted_prefs"
+    )
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _databaseUpdates = MutableSharedFlow<Unit>(replay = 1)
@@ -118,54 +127,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             }
             .flowOn(Dispatchers.IO)
 
-    private fun cursorToMessage(cursor: android.database.Cursor): Message {
-        val id = cursor.getLong(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_ID))
-        val timestamp = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_TIMESTAMP)) ?: ""
-        val senderName = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_SENDER_NAME)) ?: "匿名"
-        val groupSuffix = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_GROUP_SUFFIX)) ?: "群聊"
-        val content = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_CONTENT)) ?: ""
-        val contextIdVal = if (cursor.isNull(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_CONTEXT_ID))) {
-            null
-        } else {
-            cursor.getLong(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_CONTEXT_ID))
-        }
-        val imageUrl = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_IMAGE_URL))
-        val linkTitle = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_LINK_TITLE))
-        val linkDesc = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_LINK_DESC))
-        val linkImg = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_LINK_IMG))
-        val linkUrl = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_LINK_URL))
-        val fileUrl = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_FILE_URL))
-        val fileName = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_FILE_NAME))
-        val gId = cursor.getString(cursor.getColumnIndexOrThrow(MessageDbHelper.COLUMN_GROUP_ID))
-
-        val parentMsgIdCol = cursor.getColumnIndex(MessageDbHelper.COLUMN_PARENT_MSG_ID)
-        val parentMsgIdVal = if (parentMsgIdCol != -1 && !cursor.isNull(parentMsgIdCol)) {
-            cursor.getLong(parentMsgIdCol)
-        } else {
-            null
-        }
-
-        return Message(
-            id = id,
-            timestamp = timestamp,
-            senderName = senderName,
-            groupSuffix = groupSuffix,
-            content = content,
-            contextId = contextIdVal,
-            imageUrl = imageUrl,
-            linkTitle = linkTitle,
-            linkDesc = linkDesc,
-            linkImg = linkImg,
-            linkUrl = linkUrl,
-            fileUrl = fileUrl,
-            fileName = fileName,
-            groupId = gId,
-            parentMsgId = parentMsgIdVal
-        )
-    }
-
-    private fun findParentMessageId(
-        db: SQLiteDatabase,
+    private suspend fun findParentMessageId(
         groupId: String,
         content: String,
         replyMessageId: Long
@@ -181,280 +143,153 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
         var resolvedId: Long? = null
 
-        // 1. 如果有指定的发送者，我们先查询该发送者的消息，按照时间倒序
+        // 1. 如果有指定的发送者，先查询该发送者的消息
         if (cleanUser != null) {
-            val cursor = db.query(
-                MessageDbHelper.TABLE_NAME,
-                arrayOf(
-                    MessageDbHelper.COLUMN_ID,
-                    MessageDbHelper.COLUMN_SENDER_NAME,
-                    MessageDbHelper.COLUMN_CONTENT,
-                    MessageDbHelper.COLUMN_IMAGE_URL,
-                    MessageDbHelper.COLUMN_LINK_TITLE,
-                    MessageDbHelper.COLUMN_LINK_URL
-                ),
-                "${MessageDbHelper.COLUMN_GROUP_ID} = ? AND ${MessageDbHelper.COLUMN_SENDER_NAME} = ? AND ${MessageDbHelper.COLUMN_ID} < ?",
-                arrayOf(groupId, cleanUser, replyMessageId.toString()),
-                null, null,
-                "${MessageDbHelper.COLUMN_TIMESTAMP} DESC",
-                "100"
-            )
-            try {
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(0)
-                    val msgContent = cursor.getString(2) ?: ""
-                    val imageUrl = cursor.getString(3)
-                    val linkTitle = cursor.getString(4)
-                    val linkUrl = cursor.getString(5)
-
-                    val parsedMsg = parseMessageContent(msgContent)
-                    val msgImmediateText = parsedMsg.immediateText.trim()
-
-                    // A1: Image message match
-                    if (imageUrl != null && (cleanTargetText == "图片" || cleanTargetText.contains("图片"))) {
-                        resolvedId = id
-                        break
-                    }
-                    // A2: Link/Weibo message match
-                    if ((cleanTargetText == "微博" || cleanTargetText.contains("微博")) &&
-                        (linkUrl != null || linkTitle != null || msgContent.contains("weibo.com") || msgContent.contains("t.cn"))) {
-                        resolvedId = id
-                        break
-                    }
-                    // A3: Exact reply text match
-                    if (cleanTargetText != "微博" && cleanTargetText != "图片" && msgImmediateText == cleanTargetText) {
-                        resolvedId = id
-                        break
-                    }
-                    // A4: Substring match
-                    if (cleanTargetText != "微博" && cleanTargetText != "图片" && cleanTargetText.length >= 2 &&
-                        (msgImmediateText.contains(cleanTargetText) || cleanTargetText.contains(msgImmediateText))) {
-                        resolvedId = id
-                        break
-                    }
-                    // A5: Link title match
-                    if (linkTitle != null && cleanTargetText.contains(linkTitle)) {
-                        resolvedId = id
-                        break
-                    }
-                }
-            } finally {
-                cursor.close()
-            }
-        }
-
-        if (resolvedId != null) return resolvedId
-
-        // 2. 没有指定发送者，或者指定发送者没有匹配成功，但在数据库中存在完全文本一致的消息
-        val cursorAll = db.query(
-            MessageDbHelper.TABLE_NAME,
-            arrayOf(
-                MessageDbHelper.COLUMN_ID,
-                MessageDbHelper.COLUMN_SENDER_NAME,
-                MessageDbHelper.COLUMN_CONTENT,
-                MessageDbHelper.COLUMN_IMAGE_URL,
-                MessageDbHelper.COLUMN_LINK_TITLE,
-                MessageDbHelper.COLUMN_LINK_URL
-            ),
-            "${MessageDbHelper.COLUMN_GROUP_ID} = ? AND ${MessageDbHelper.COLUMN_ID} < ?",
-            arrayOf(groupId, replyMessageId.toString()),
-            null, null,
-            "${MessageDbHelper.COLUMN_TIMESTAMP} DESC",
-            "200"
-        )
-        try {
-            while (cursorAll.moveToNext()) {
-                val id = cursorAll.getLong(0)
-                val senderName = cursorAll.getString(1) ?: ""
-                val msgContent = cursorAll.getString(2) ?: ""
-                val imageUrl = cursorAll.getString(3)
-                val linkTitle = cursorAll.getString(4)
-                val linkUrl = cursorAll.getString(5)
-
-                val parsedMsg = parseMessageContent(msgContent)
+            val candidates = messageDao.getMessagesBySenderBefore(groupId, cleanUser, replyMessageId, 100)
+            for (msg in candidates) {
+                val parsedMsg = parseMessageContent(msg.content)
                 val msgImmediateText = parsedMsg.immediateText.trim()
 
-                if (cleanTargetText != "微博" && cleanTargetText != "图片" && msgImmediateText.isNotBlank() && msgImmediateText == cleanTargetText) {
-                    if (cleanUser == null || senderName.trim().equals(cleanUser, ignoreCase = true)) {
-                        resolvedId = id
-                        break
-                    }
+                if (msg.imageUrl != null && (cleanTargetText == "图片" || cleanTargetText.contains("图片"))) {
+                    resolvedId = msg.id; break
                 }
-
-                if (cleanUser == null) {
-                    if (imageUrl != null && (cleanTargetText == "图片" || cleanTargetText.contains("图片"))) {
-                        resolvedId = id
-                        break
-                    }
-                    if ((cleanTargetText == "微博" || cleanTargetText.contains("微博")) &&
-                        (linkUrl != null || linkTitle != null || msgContent.contains("weibo.com") || msgContent.contains("t.cn"))) {
-                        resolvedId = id
-                        break
-                    }
+                if ((cleanTargetText == "微博" || cleanTargetText.contains("微博")) &&
+                    (msg.linkUrl != null || msg.linkTitle != null || msg.content.contains("weibo.com") || msg.content.contains("t.cn"))) {
+                    resolvedId = msg.id; break
+                }
+                if (cleanTargetText != "微博" && cleanTargetText != "图片" && msgImmediateText == cleanTargetText) {
+                    resolvedId = msg.id; break
+                }
+                if (cleanTargetText != "微博" && cleanTargetText != "图片" && cleanTargetText.length >= 2 &&
+                    (msgImmediateText.contains(cleanTargetText) || cleanTargetText.contains(msgImmediateText))) {
+                    resolvedId = msg.id; break
+                }
+                if (msg.linkTitle != null && cleanTargetText.contains(msg.linkTitle)) {
+                    resolvedId = msg.id; break
                 }
             }
-        } finally {
-            cursorAll.close()
         }
 
         if (resolvedId != null) return resolvedId
 
-        // 3. 兜底：如果指定了发送者，直接找最近一条该发送者的消息
-        if (cleanUser != null) {
-            val cursorSender = db.query(
-                MessageDbHelper.TABLE_NAME,
-                arrayOf(MessageDbHelper.COLUMN_ID),
-                "${MessageDbHelper.COLUMN_GROUP_ID} = ? AND ${MessageDbHelper.COLUMN_SENDER_NAME} = ? AND ${MessageDbHelper.COLUMN_ID} < ?",
-                arrayOf(groupId, cleanUser, replyMessageId.toString()),
-                null, null,
-                "${MessageDbHelper.COLUMN_TIMESTAMP} DESC",
-                "1"
-            )
-            try {
-                if (cursorSender.moveToFirst()) {
-                    resolvedId = cursorSender.getLong(0)
+        // 2. 没有指定发送者，或指定发送者没有匹配成功
+        val allCandidates = messageDao.getMessagesBefore(groupId, replyMessageId, 200)
+        for (msg in allCandidates) {
+            val parsedMsg = parseMessageContent(msg.content)
+            val msgImmediateText = parsedMsg.immediateText.trim()
+
+            if (cleanTargetText != "微博" && cleanTargetText != "图片" && msgImmediateText.isNotBlank() && msgImmediateText == cleanTargetText) {
+                if (cleanUser == null || msg.senderName.trim().equals(cleanUser, ignoreCase = true)) {
+                    resolvedId = msg.id; break
                 }
-            } finally {
-                cursorSender.close()
             }
+
+            if (cleanUser == null) {
+                if (msg.imageUrl != null && (cleanTargetText == "图片" || cleanTargetText.contains("图片"))) {
+                    resolvedId = msg.id; break
+                }
+                if ((cleanTargetText == "微博" || cleanTargetText.contains("微博")) &&
+                    (msg.linkUrl != null || msg.linkTitle != null || msg.content.contains("weibo.com") || msg.content.contains("t.cn"))) {
+                    resolvedId = msg.id; break
+                }
+            }
+        }
+
+        if (resolvedId != null) return resolvedId
+
+        // 3. 兜底：直接找最近一条该发送者的消息
+        if (cleanUser != null) {
+            val fallback = messageDao.getMessagesBySenderBefore(groupId, cleanUser, replyMessageId, 1)
+            resolvedId = fallback.firstOrNull()?.id
         }
 
         return resolvedId
     }
 
-    private fun createContentValues(db: SQLiteDatabase, wm: WeiboMessage, groupId: String): ContentValues {
-        val values = ContentValues().apply {
-            put(MessageDbHelper.COLUMN_ID, wm.id)
-            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-            val timeStr = sdf.format(Date(wm.time * 1000))
-            put(MessageDbHelper.COLUMN_TIMESTAMP, timeStr)
-            put(MessageDbHelper.COLUMN_SENDER_NAME, wm.from_user?.screen_name ?: "新浪用户")
-            put(MessageDbHelper.COLUMN_GROUP_SUFFIX, "群聊")
-            put(MessageDbHelper.COLUMN_CONTENT, wm.content)
-            put(MessageDbHelper.COLUMN_CONTEXT_ID, 1L)
-            put(MessageDbHelper.COLUMN_GROUP_ID, groupId)
+    private suspend fun buildMessageEntity(wm: WeiboMessage, groupId: String): MessageEntity {
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+        val timeStr = sdf.format(Date(wm.time * 1000))
 
-            // Image parsing
-            if (wm.media_type == 1 && !wm.fids.isNullOrEmpty()) {
-                val fid = wm.fids.first()
-                val imgUrl = "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=$fid&high=480&width=480&size=480,480&source=209678993"
-                put(MessageDbHelper.COLUMN_IMAGE_URL, imgUrl)
-            } else {
-                putNull(MessageDbHelper.COLUMN_IMAGE_URL)
-            }
+        var imageUrl: String? = null
+        if (wm.media_type == 1 && !wm.fids.isNullOrEmpty()) {
+            val fid = wm.fids.first()
+            imageUrl = "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=$fid&high=480&width=480&size=480,480&source=209678993"
+        }
 
-            // Link preview parsing
-            if (!wm.url_objects.isNullOrEmpty()) {
-                val urlObj = wm.url_objects.first()
-                val status = urlObj.status
-                val info = urlObj.info
-                val title = status?.user?.screen_name?.let { "微博：@$it" } ?: info?.title
-                val desc = status?.text ?: info?.description
-                val img = status?.thumbnail_pic ?: status?.original_pic
-                val url = info?.url_long ?: urlObj.url_ori ?: wm.content
-
-                if (title != null || desc != null) {
-                    put(MessageDbHelper.COLUMN_LINK_TITLE, title)
-                    put(MessageDbHelper.COLUMN_LINK_DESC, desc)
-                    put(MessageDbHelper.COLUMN_LINK_IMG, img)
-                    put(MessageDbHelper.COLUMN_LINK_URL, url)
-                } else {
-                    putNull(MessageDbHelper.COLUMN_LINK_TITLE)
-                    putNull(MessageDbHelper.COLUMN_LINK_DESC)
-                    putNull(MessageDbHelper.COLUMN_LINK_IMG)
-                    putNull(MessageDbHelper.COLUMN_LINK_URL)
-                }
-            } else {
-                putNull(MessageDbHelper.COLUMN_LINK_TITLE)
-                putNull(MessageDbHelper.COLUMN_LINK_DESC)
-                putNull(MessageDbHelper.COLUMN_LINK_IMG)
-                putNull(MessageDbHelper.COLUMN_LINK_URL)
-            }
-
-            // File parsing
-            if (wm.media_type == 5 && !wm.fids.isNullOrEmpty()) {
-                val fid = wm.fids.first()
-                val fileUrl = "https://upload.api.weibo.com/2/mss/msget?fid=$fid&source=209678993"
-                put(MessageDbHelper.COLUMN_FILE_URL, fileUrl)
-                put(MessageDbHelper.COLUMN_FILE_NAME, wm.content)
-            } else {
-                putNull(MessageDbHelper.COLUMN_FILE_URL)
-                putNull(MessageDbHelper.COLUMN_FILE_NAME)
-            }
-
-            // Parse and associate parent message ID
-            val parentId = findParentMessageId(db, groupId, wm.content, wm.id)
-            if (parentId != null) {
-                put(MessageDbHelper.COLUMN_PARENT_MSG_ID, parentId)
-            } else {
-                putNull(MessageDbHelper.COLUMN_PARENT_MSG_ID)
+        var linkTitle: String? = null
+        var linkDesc: String? = null
+        var linkImg: String? = null
+        var linkUrl: String? = null
+        if (!wm.url_objects.isNullOrEmpty()) {
+            val urlObj = wm.url_objects.first()
+            val status = urlObj.status
+            val info = urlObj.info
+            val title = status?.user?.screen_name?.let { "微博：@$it" } ?: info?.title
+            val desc = status?.text ?: info?.description
+            val img = status?.thumbnail_pic ?: status?.original_pic
+            val url = info?.url_long ?: urlObj.url_ori ?: wm.content
+            if (title != null || desc != null) {
+                linkTitle = title
+                linkDesc = desc
+                linkImg = img
+                linkUrl = url
             }
         }
-        return values
+
+        var fileUrl: String? = null
+        var fileName: String? = null
+        if (wm.media_type == 5 && !wm.fids.isNullOrEmpty()) {
+            val fid = wm.fids.first()
+            fileUrl = "https://upload.api.weibo.com/2/mss/msget?fid=$fid&source=209678993"
+            fileName = wm.content
+        }
+
+        val parentId = findParentMessageId(groupId, wm.content, wm.id)
+
+        return MessageEntity(
+            id = wm.id,
+            timestamp = timeStr,
+            senderName = wm.from_user?.screen_name ?: "新浪用户",
+            groupSuffix = "群聊",
+            content = wm.content,
+            contextId = 1L,
+            imageUrl = imageUrl,
+            linkTitle = linkTitle,
+            linkDesc = linkDesc,
+            linkImg = linkImg,
+            linkUrl = linkUrl,
+            fileUrl = fileUrl,
+            fileName = fileName,
+            groupId = groupId,
+            parentMsgId = parentId
+        )
     }
 
-    private fun shouldUpdateMessage(db: SQLiteDatabase, wm: WeiboMessage): Boolean {
-        try {
-            val cursor = db.query(
-                MessageDbHelper.TABLE_NAME,
-                arrayOf(MessageDbHelper.COLUMN_IMAGE_URL, MessageDbHelper.COLUMN_LINK_TITLE, MessageDbHelper.COLUMN_FILE_URL),
-                "${MessageDbHelper.COLUMN_ID} = ?",
-                arrayOf(wm.id.toString()),
-                null, null, null
-            )
-            if (cursor.count == 0) {
-                cursor.close()
-                return true
-            }
-            cursor.moveToFirst()
-            val currentImg = cursor.getString(0)
-            val currentLinkTitle = cursor.getString(1)
-            val currentFileUrl = cursor.getString(2)
-            cursor.close()
-
-            if (wm.media_type == 1 && !wm.fids.isNullOrEmpty() && currentImg.isNullOrEmpty()) {
-                return true
-            }
-            if (!wm.url_objects.isNullOrEmpty() && currentLinkTitle.isNullOrEmpty()) {
-                return true
-            }
-            if (wm.media_type == 5 && !wm.fids.isNullOrEmpty() && currentFileUrl.isNullOrEmpty()) {
-                return true
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+    private suspend fun shouldUpdateMessage(wm: WeiboMessage): Boolean {
+        val existing = messageDao.getMediaFields(wm.id) ?: return true
+        if (wm.media_type == 1 && !wm.fids.isNullOrEmpty() && existing.imageUrl.isNullOrEmpty()) return true
+        if (!wm.url_objects.isNullOrEmpty() && existing.linkTitle.isNullOrEmpty()) return true
+        if (wm.media_type == 5 && !wm.fids.isNullOrEmpty() && existing.fileUrl.isNullOrEmpty()) return true
         return false
     }
 
-    private fun upsertApiMessages(
-        db: SQLiteDatabase,
+    private suspend fun upsertApiMessages(
         groupId: String,
         messages: List<WeiboMessage>,
         updateExisting: Boolean = true
     ): Int {
-        var changed = 0
-        db.beginTransaction()
-        try {
-            for (wm in messages) {
-                val exists = isMessageExists(wm.id)
-                val needsUpdate = updateExisting && exists && shouldUpdateMessage(db, wm)
-                if (!exists || needsUpdate) {
-                    val values = createContentValues(db, wm, groupId)
-                    db.insertWithOnConflict(
-                        MessageDbHelper.TABLE_NAME,
-                        null,
-                        values,
-                        android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
-                    )
-                    changed++
-                }
+        val toInsert = mutableListOf<MessageEntity>()
+        for (wm in messages) {
+            val exists = messageDao.existsById(wm.id)
+            val needsUpdate = updateExisting && exists && shouldUpdateMessage(wm)
+            if (!exists || needsUpdate) {
+                toInsert.add(buildMessageEntity(wm, groupId))
             }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
         }
-        return changed
+        if (toInsert.isNotEmpty()) {
+            messageDao.insertOrReplaceAll(toInsert)
+        }
+        return toInsert.size
     }
 
     private fun startPeriodicSync() {
@@ -474,14 +309,13 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
                         }
                     )
                     if (response != null && response.result && response.messages != null) {
-                        val db = dbHelper.writableDatabase
-                        val changed = upsertApiMessages(db, targetGroupId, response.messages)
+                        val changed = upsertApiMessages(targetGroupId, response.messages)
                         if (changed > 0) {
                             _databaseUpdates.emit(Unit)
                         }
                     }
                 }
-                delay(60000) // Poll every 60 seconds
+                delay(60000)
             }
         }
     }
@@ -500,8 +334,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
                     }
                 )
                 if (response != null && response.result && response.messages != null) {
-                    val db = dbHelper.writableDatabase
-                    val changed = upsertApiMessages(db, targetGroupId, response.messages)
+                    val changed = upsertApiMessages(targetGroupId, response.messages)
                     if (changed > 0) {
                         _databaseUpdates.emit(Unit)
                     }
@@ -510,39 +343,10 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         }
     }
 
-    private fun isMessageExists(id: Long): Boolean {
-        val db = dbHelper.readableDatabase
-        val cursor = db.query(
-            MessageDbHelper.TABLE_NAME,
-            arrayOf(MessageDbHelper.COLUMN_ID),
-            "${MessageDbHelper.COLUMN_ID} = ?",
-            arrayOf(id.toString()),
-            null, null, null
-        )
-        val exists = cursor.count > 0
-        cursor.close()
-        return exists
-    }
-
-    private fun queryMessagesByGroupId(groupId: String): List<Message> {
+    private suspend fun queryMessagesByGroupId(groupId: String): List<Message> {
         try {
-            val db = dbHelper.readableDatabase
-            val cursor = db.query(
-                MessageDbHelper.TABLE_NAME,
-                null,
-                "${MessageDbHelper.COLUMN_GROUP_ID} = ?",
-                arrayOf(groupId),
-                null, null,
-                "${MessageDbHelper.COLUMN_TIMESTAMP} ASC"
-            )
-            val messages = mutableListOf<Message>()
-            with(cursor) {
-                while (moveToNext()) {
-                    messages.add(cursorToMessage(this))
-                }
-                close()
-            }
-            return filterBlocked(messages)
+            val entities = messageDao.getMessagesByGroupIdDesc(groupId, MESSAGE_LOAD_LIMIT)
+            return entities.asReversed().map { it.toMessage() }.let { filterBlocked(it) }
         } catch (e: Exception) {
             android.util.Log.e("WeiboChat", "Error in queryMessagesByGroupId", e)
             throw e
@@ -569,107 +373,49 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             if (response != null && response.result) {
                 val mid = response.id ?: response.mid ?: System.currentTimeMillis()
                 val responseTime = response.time ?: response.ts ?: (System.currentTimeMillis() / 1000)
-                
-                val db = dbHelper.writableDatabase
-                val values = ContentValues().apply {
-                    put(MessageDbHelper.COLUMN_ID, mid)
-                    val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-                    val timeStr = sdf.format(Date(responseTime * 1000))
-                    put(MessageDbHelper.COLUMN_TIMESTAMP, timeStr)
-                    put(MessageDbHelper.COLUMN_SENDER_NAME, response.from_user?.screen_name ?: "我")
-                    put(MessageDbHelper.COLUMN_GROUP_SUFFIX, "群聊")
-                    put(MessageDbHelper.COLUMN_CONTENT, content)
-                    if (contextId != null) {
-                        put(MessageDbHelper.COLUMN_CONTEXT_ID, contextId)
-                    } else {
-                        putNull(MessageDbHelper.COLUMN_CONTEXT_ID)
-                    }
-                    putNull(MessageDbHelper.COLUMN_IMAGE_URL)
-                    putNull(MessageDbHelper.COLUMN_LINK_TITLE)
-                    putNull(MessageDbHelper.COLUMN_LINK_DESC)
-                    putNull(MessageDbHelper.COLUMN_LINK_IMG)
-                    putNull(MessageDbHelper.COLUMN_LINK_URL)
-                    putNull(MessageDbHelper.COLUMN_FILE_URL)
-                    putNull(MessageDbHelper.COLUMN_FILE_NAME)
-                    put(MessageDbHelper.COLUMN_GROUP_ID, targetGroupId)
-                    
-                    val parentId = findParentMessageId(db, targetGroupId, content, mid)
-                    if (parentId != null) {
-                        put(MessageDbHelper.COLUMN_PARENT_MSG_ID, parentId)
-                    } else {
-                        putNull(MessageDbHelper.COLUMN_PARENT_MSG_ID)
-                    }
-                }
-                db.insertWithOnConflict(
-                    MessageDbHelper.TABLE_NAME,
-                    null,
-                    values,
-                    android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+                val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+                val parentId = findParentMessageId(targetGroupId, content, mid)
+
+                val entity = MessageEntity(
+                    id = mid,
+                    timestamp = sdf.format(Date(responseTime * 1000)),
+                    senderName = response.from_user?.screen_name ?: "我",
+                    groupSuffix = "群聊",
+                    content = content,
+                    contextId = contextId,
+                    groupId = targetGroupId,
+                    parentMsgId = parentId
                 )
+                messageDao.insertOrReplace(entity)
                 _databaseUpdates.emit(Unit)
                 return@withContext mid
             }
         }
-        
+
         // Fallback: Local insert for offline/simulation mode
         val mid = System.currentTimeMillis()
-        val db = dbHelper.writableDatabase
-        val values = ContentValues().apply {
-            put(MessageDbHelper.COLUMN_ID, mid)
-            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-            put(MessageDbHelper.COLUMN_TIMESTAMP, sdf.format(Date()))
-            put(MessageDbHelper.COLUMN_SENDER_NAME, senderName)
-            put(MessageDbHelper.COLUMN_GROUP_SUFFIX, "群聊")
-            put(MessageDbHelper.COLUMN_CONTENT, content)
-            if (contextId != null) {
-                put(MessageDbHelper.COLUMN_CONTEXT_ID, contextId)
-            } else {
-                putNull(MessageDbHelper.COLUMN_CONTEXT_ID)
-            }
-            putNull(MessageDbHelper.COLUMN_IMAGE_URL)
-            putNull(MessageDbHelper.COLUMN_LINK_TITLE)
-            putNull(MessageDbHelper.COLUMN_LINK_DESC)
-            putNull(MessageDbHelper.COLUMN_LINK_IMG)
-            putNull(MessageDbHelper.COLUMN_LINK_URL)
-            putNull(MessageDbHelper.COLUMN_FILE_URL)
-            putNull(MessageDbHelper.COLUMN_FILE_NAME)
-            put(MessageDbHelper.COLUMN_GROUP_ID, targetGroupId.ifBlank { "4761715839862414" })
-            
-            val parentId = findParentMessageId(db, targetGroupId.ifBlank { "4761715839862414" }, content, mid)
-            if (parentId != null) {
-                put(MessageDbHelper.COLUMN_PARENT_MSG_ID, parentId)
-            } else {
-                putNull(MessageDbHelper.COLUMN_PARENT_MSG_ID)
-            }
-        }
-        db.insertWithOnConflict(
-            MessageDbHelper.TABLE_NAME,
-            null,
-            values,
-            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+        val fallbackGroupId = targetGroupId.ifBlank { "4761715839862414" }
+        val parentId = findParentMessageId(fallbackGroupId, content, mid)
+
+        val entity = MessageEntity(
+            id = mid,
+            timestamp = sdf.format(Date()),
+            senderName = senderName,
+            groupSuffix = "群聊",
+            content = content,
+            contextId = contextId,
+            groupId = fallbackGroupId,
+            parentMsgId = parentId
         )
+        messageDao.insertOrReplace(entity)
         _databaseUpdates.emit(Unit)
         return@withContext mid
     }
 
     override suspend fun getMessagesByContextId(contextId: Long): List<Message> = withContext(Dispatchers.IO) {
-        val db = dbHelper.readableDatabase
-        val cursor = db.query(
-            MessageDbHelper.TABLE_NAME,
-            null,
-            "${MessageDbHelper.COLUMN_CONTEXT_ID} = ?",
-            arrayOf(contextId.toString()),
-            null, null,
-            "${MessageDbHelper.COLUMN_TIMESTAMP} ASC"
-        )
-        val messages = mutableListOf<Message>()
-        with(cursor) {
-            while (moveToNext()) {
-                messages.add(cursorToMessage(this))
-            }
-            close()
-        }
-        filterBlocked(messages)
+        val entities = messageDao.getMessagesByContextId(contextId)
+        filterBlocked(entities.map { it.toMessage() })
     }
 
     override fun saveCredentials(cookie: String, groupId: String) {
@@ -717,8 +463,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
                 }
             )
             if (response != null && response.result && response.messages != null && response.messages.isNotEmpty()) {
-                val db = dbHelper.writableDatabase
-                val changed = upsertApiMessages(db, targetGroupId, response.messages)
+                val changed = upsertApiMessages(targetGroupId, response.messages)
                 if (changed > 0) {
                     _databaseUpdates.emit(Unit)
                 }
@@ -728,9 +473,17 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         return@withContext false
     }
 
+    override suspend fun loadOlderLocalMessages(groupId: String, beforeTimestamp: String, limit: Int): List<Message> = withContext(Dispatchers.IO) {
+        try {
+            val entities = messageDao.getOlderMessages(groupId, beforeTimestamp, limit)
+            return@withContext filterBlocked(entities.asReversed().map { it.toMessage() })
+        } catch (e: Exception) {
+            android.util.Log.e("WeiboChat", "Error in loadOlderLocalMessages", e)
+            return@withContext emptyList()
+        }
+    }
+
     override suspend fun getUserContextMessages(senderName: String, timestamp: String): List<Message> = withContext(Dispatchers.IO) {
-        val db = dbHelper.readableDatabase
-        val messages = mutableListOf<Message>()
         val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         try {
             val date = sdf.parse(timestamp) ?: Date()
@@ -741,24 +494,12 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             val endTime = sdf.format(cal.time)
 
             val targetGroupId = activeGroupIdFlow.value ?: getCredentials().second
-            val cursor = db.query(
-                MessageDbHelper.TABLE_NAME,
-                null,
-                "${MessageDbHelper.COLUMN_SENDER_NAME} = ? AND ${MessageDbHelper.COLUMN_GROUP_ID} = ? AND ${MessageDbHelper.COLUMN_TIMESTAMP} BETWEEN ? AND ?",
-                arrayOf(senderName, targetGroupId, startTime, endTime),
-                null, null,
-                "${MessageDbHelper.COLUMN_TIMESTAMP} ASC"
-            )
-            with(cursor) {
-                while (moveToNext()) {
-                    messages.add(cursorToMessage(this))
-                }
-                close()
-            }
+            val entities = messageDao.getUserContextMessages(senderName, targetGroupId, startTime, endTime)
+            return@withContext filterBlocked(entities.map { it.toMessage() })
         } catch (e: Exception) {
             e.printStackTrace()
+            return@withContext emptyList()
         }
-        filterBlocked(messages)
     }
 
     override suspend fun fetchContacts(): List<WeiboContact> {
@@ -923,30 +664,77 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
     }
 
     override fun saveBlockedKeywords(keywords: String) {
-        sharedPrefs.edit().putString("blocked_keywords", keywords).apply()
-        _databaseUpdates.tryEmit(Unit)
+        val rules = keywords.split(Regex("[,，]")).map { it.trim() }.filter { it.isNotEmpty() }
+            .map { BlockedKeywordRule(it, MatchMode.CONTAINS) }
+        saveBlockedKeywordRules(rules)
     }
 
     override fun getBlockedKeywordsString(): String {
-        return sharedPrefs.getString("blocked_keywords", "撤回了一条消息,红包,🧧,系统消息,群规") ?: "撤回了一条消息,红包,🧧,系统消息,群规"
+        return getBlockedKeywordRules().joinToString(",") { it.text }
     }
 
     override fun getBlockedKeywordsList(): List<String> {
-        val s = getBlockedKeywordsString()
-        if (s.isBlank()) return emptyList()
-        return s.split(Regex("[,，]")).map { it.trim() }.filter { it.isNotEmpty() }
+        return getBlockedKeywordRules().map { it.text }
+    }
+
+    override fun getBlockedKeywordRules(): List<BlockedKeywordRule> {
+        val gson = Gson()
+        val json = sharedPrefs.getString("blocked_keywords_rules", null)
+        if (json != null) {
+            try {
+                val type = object : com.google.gson.reflect.TypeToken<List<BlockedKeywordRule>>() {}.type
+                val rules: List<BlockedKeywordRule> = gson.fromJson(json, type)
+                if (rules.isNotEmpty()) return rules
+            } catch (_: Exception) {}
+        }
+        // Migrate from old StringSet
+        val oldSet = sharedPrefs.getStringSet("blocked_keywords_set", null)
+        if (oldSet != null && oldSet.isNotEmpty()) {
+            val rules = oldSet.map { BlockedKeywordRule(it, MatchMode.CONTAINS) }
+            sharedPrefs.edit().putString("blocked_keywords_rules", gson.toJson(rules)).remove("blocked_keywords_set").apply()
+            return rules
+        }
+        // Migrate from old comma-separated string
+        val oldStr = sharedPrefs.getString("blocked_keywords", null)
+        if (oldStr != null) {
+            val rules = oldStr.split(Regex("[,，]")).map { it.trim() }.filter { it.isNotEmpty() }
+                .map { BlockedKeywordRule(it, MatchMode.CONTAINS) }
+            sharedPrefs.edit().putString("blocked_keywords_rules", gson.toJson(rules)).remove("blocked_keywords").apply()
+            return rules
+        }
+        // Default
+        return listOf("撤回了一条消息", "红包", "🧧", "系统消息", "群规")
+            .map { BlockedKeywordRule(it, MatchMode.CONTAINS) }
+    }
+
+    override fun saveBlockedKeywordRules(rules: List<BlockedKeywordRule>) {
+        val gson = Gson()
+        sharedPrefs.edit().putString("blocked_keywords_rules", gson.toJson(rules)).apply()
+        _databaseUpdates.tryEmit(Unit)
     }
 
     override fun saveBlockedUsers(users: String) {
-        sharedPrefs.edit().putString("blocked_users", users).apply()
+        val set = users.split(Regex("[,，]")).map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        sharedPrefs.edit().putStringSet("blocked_users_set", set).apply()
         _databaseUpdates.tryEmit(Unit)
     }
 
     override fun getBlockedUsersString(): String {
-        return sharedPrefs.getString("blocked_users", "") ?: ""
+        val set = sharedPrefs.getStringSet("blocked_users_set", null)
+        if (set != null) return set.joinToString(",")
+        // Migrate from old comma-separated string
+        val old = sharedPrefs.getString("blocked_users", null)
+        if (old != null) {
+            val migrated = old.split(Regex("[,，]")).map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            sharedPrefs.edit().putStringSet("blocked_users_set", migrated).remove("blocked_users").apply()
+            return migrated.joinToString(",")
+        }
+        return ""
     }
 
     override fun getBlockedUsersList(): List<String> {
+        val set = sharedPrefs.getStringSet("blocked_users_set", null)
+        if (set != null) return set.toList()
         val s = getBlockedUsersString()
         if (s.isBlank()) return emptyList()
         return s.split(Regex("[,，]")).map { it.trim() }.filter { it.isNotEmpty() }
@@ -954,12 +742,20 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
     override fun isMessageBlocked(sender: String, content: String): Boolean {
         val blockedUsers = getBlockedUsersList()
-        val blockedKeywords = getBlockedKeywordsList()
         if (sender.isNotBlank() && blockedUsers.any { it.equals(sender, ignoreCase = true) }) {
             return true
         }
-        if (blockedKeywords.any { content.contains(it) }) {
-            return true
+        val rules = getBlockedKeywordRules()
+        for (rule in rules) {
+            if (rule.text.isBlank()) continue
+            val matched = when (rule.mode) {
+                MatchMode.CONTAINS -> content.contains(rule.text)
+                MatchMode.EXACT -> content.trim() == rule.text
+                MatchMode.REGEX -> try {
+                    Regex(rule.text).containsMatchIn(content)
+                } catch (_: Exception) { false }
+            }
+            if (matched) return true
         }
         return false
     }
@@ -1112,11 +908,9 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         if (cookie.isBlank() || targetGroupId.isBlank()) return@withContext 0
 
         var currentMaxMid = 0L
-
         var totalSynced = 0
         var loopCount = 0
         val maxLoops = 200
-        val writeDb = dbHelper.writableDatabase
         val seenPageOldest = mutableSetOf<Long>()
 
         while (loopCount < maxLoops) {
@@ -1137,38 +931,24 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
                 null
             }
 
-            if (response == null || !response.result || response.messages.isNullOrEmpty()) {
-                break
-            }
+            if (response == null || !response.result || response.messages.isNullOrEmpty()) break
 
             val list = response.messages
-            val changed = upsertApiMessages(writeDb, targetGroupId, list)
+            val changed = upsertApiMessages(targetGroupId, list)
             totalSynced += changed
-            if (changed > 0) {
-                _databaseUpdates.emit(Unit)
-            }
+            if (changed > 0) _databaseUpdates.emit(Unit)
 
             val oldestMsg = list.minByOrNull { it.time } ?: break
             val oldestTimeMillis = oldestMsg.time * 1000
             val oldestId = list.minOf { it.id }
 
-            if (!seenPageOldest.add(oldestId) || oldestId >= currentMaxMid && currentMaxMid > 0L) {
-                android.util.Log.w("WeiboChat", "History sync stopped because pagination did not move: currentMaxMid=$currentMaxMid, oldestId=$oldestId")
-                break
-            }
-
-            if (oldTimeMillisToBreak(oldestTimeMillis, targetTimeMillis)) {
-                break
-            }
+            if (!seenPageOldest.add(oldestId) || oldestId >= currentMaxMid && currentMaxMid > 0L) break
+            if (oldestTimeMillis <= targetTimeMillis) break
 
             currentMaxMid = oldestId
         }
 
         return@withContext totalSynced
-    }
-
-    private fun oldTimeMillisToBreak(oldestTimeMillis: Long, targetTimeMillis: Long): Boolean {
-        return oldestTimeMillis <= targetTimeMillis
     }
 
     override fun markWeiboStatusAsRead(statusId: String) {
@@ -1198,44 +978,35 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
     override suspend fun syncNewTimeline(): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val localNewestId = getLocalNewestWeiboId()
+            val localNewestId = weiboDao.getNewestWeiboId() ?: 0L
             val response = fetchFriendsTimeline(sinceId = localNewestId)
                 ?: return@withContext Result.failure(Exception("Failed to fetch timeline from network"))
             if (response.ok != 1) {
                 return@withContext Result.failure(Exception(response.msg ?: "Network response not OK"))
             }
-            
+
             val statuses = response.statuses.orEmpty()
             if (statuses.isNotEmpty()) {
-                val db = dbHelper.writableDatabase
-                
                 val oldestStatus = statuses.minByOrNull { it.id ?: it.idstr?.toLongOrNull() ?: Long.MAX_VALUE }
                 val oldestId = oldestStatus?.let { it.id ?: it.idstr?.toLongOrNull() }
-                
+
                 if (localNewestId > 0L && oldestId != null && oldestId > localNewestId && statuses.size >= 15) {
                     val gapId = oldestId - 1
                     val gapCreatedAtLong = parseWeiboCreatedAt(oldestStatus.created_at) - 1000L
-                    
-                    val gapValues = ContentValues().apply {
-                        put(MessageDbHelper.COLUMN_WEIBO_ID, gapId)
-                        put(MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG, gapCreatedAtLong)
-                        put(MessageDbHelper.COLUMN_WEIBO_JSON, "")
-                        put(MessageDbHelper.COLUMN_WEIBO_IS_GAP, 1)
-                        put(MessageDbHelper.COLUMN_WEIBO_GAP_SINCE_ID, localNewestId)
-                        put(MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID, oldestId - 1)
-                    }
-                    db.insertWithOnConflict(
-                        MessageDbHelper.TABLE_WEIBO,
-                        null,
-                        gapValues,
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
+                    weiboDao.insertOrReplace(WeiboEntity(
+                        id = gapId,
+                        createdAtLong = gapCreatedAtLong,
+                        contentJson = "",
+                        isGap = 1,
+                        gapSinceId = localNewestId,
+                        gapMaxId = oldestId - 1
+                    ))
                 }
-                
-                insertWeiboStatuses(db, statuses)
+
+                insertWeiboStatuses(statuses)
                 prefetchImages(statuses)
                 pruneOldWeibos()
-                
+
                 _weiboDatabaseUpdates.emit(Unit)
             }
             Result.success(Unit)
@@ -1246,76 +1017,41 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
     override suspend fun syncGap(gapId: Long): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val db = dbHelper.writableDatabase
-            var gapSinceId = 0L
-            var gapMaxId = 0L
-            val cursor = db.query(
-                MessageDbHelper.TABLE_WEIBO,
-                arrayOf(MessageDbHelper.COLUMN_WEIBO_GAP_SINCE_ID, MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID),
-                "${MessageDbHelper.COLUMN_WEIBO_ID} = ? AND ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 1",
-                arrayOf(gapId.toString()),
-                null, null, null
-            )
-            cursor.use {
-                if (it.moveToFirst()) {
-                    gapSinceId = it.getLong(0)
-                    gapMaxId = it.getLong(1)
-                }
-            }
-            
+            val gap = weiboDao.getGapById(gapId)
+                ?: return@withContext Result.failure(Exception("Gap not found"))
+            val gapSinceId = gap.gapSinceId ?: 0L
+            val gapMaxId = gap.gapMaxId ?: 0L
             if (gapSinceId == 0L || gapMaxId == 0L) return@withContext Result.failure(Exception("Gap not found"))
-            
+
             var currentMaxId = gapMaxId
             var loopCount = 0
             val maxLoops = 10
-            
+
             while (currentMaxId > gapSinceId && loopCount < maxLoops) {
                 loopCount++
-                if (loopCount > 1) {
-                    delay(3000)
-                }
-                
+                if (loopCount > 1) delay(3000)
+
                 val response = fetchFriendsTimeline(maxId = currentMaxId) ?: break
-                if (response.ok != 1 || response.statuses.isNullOrEmpty()) {
-                    break
-                }
-                
+                if (response.ok != 1 || response.statuses.isNullOrEmpty()) break
+
                 val statuses = response.statuses
-                insertWeiboStatuses(db, statuses)
+                insertWeiboStatuses(statuses)
                 prefetchImages(statuses)
-                
+
                 val oldestFetchedId = statuses.minOfOrNull { it.id ?: it.idstr?.toLongOrNull() ?: Long.MAX_VALUE } ?: Long.MAX_VALUE
-                if (oldestFetchedId >= currentMaxId) {
-                    break
-                }
+                if (oldestFetchedId >= currentMaxId) break
                 currentMaxId = oldestFetchedId - 1
-                
+
                 if (currentMaxId > gapSinceId) {
-                    val values = ContentValues().apply {
-                        put(MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID, currentMaxId)
-                    }
-                    db.update(
-                        MessageDbHelper.TABLE_WEIBO,
-                        values,
-                        "${MessageDbHelper.COLUMN_WEIBO_ID} = ?",
-                        arrayOf(gapId.toString())
-                    )
+                    weiboDao.updateGapMaxId(gapId, currentMaxId)
                 } else {
-                    db.delete(
-                        MessageDbHelper.TABLE_WEIBO,
-                        "${MessageDbHelper.COLUMN_WEIBO_ID} = ?",
-                        arrayOf(gapId.toString())
-                    )
+                    weiboDao.deleteById(gapId)
                 }
                 _weiboDatabaseUpdates.emit(Unit)
             }
-            
+
             if (currentMaxId <= gapSinceId) {
-                db.delete(
-                    MessageDbHelper.TABLE_WEIBO,
-                    "${MessageDbHelper.COLUMN_WEIBO_ID} = ?",
-                    arrayOf(gapId.toString())
-                )
+                weiboDao.deleteById(gapId)
                 _weiboDatabaseUpdates.emit(Unit)
             }
             Result.success(Unit)
@@ -1326,10 +1062,8 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
     override suspend fun loadMoreTimeline(): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val oldestId = getLocalOldestWeiboId()
-            if (oldestId == 0L) {
-                return@withContext syncNewTimeline()
-            }
+            val oldestId = weiboDao.getOldestWeiboId() ?: 0L
+            if (oldestId == 0L) return@withContext syncNewTimeline()
             val response = fetchFriendsTimeline(maxId = oldestId - 1)
                 ?: return@withContext Result.failure(Exception("Failed to fetch older timeline posts"))
             if (response.ok != 1) {
@@ -1337,8 +1071,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             }
             val statuses = response.statuses.orEmpty()
             if (statuses.isNotEmpty()) {
-                val db = dbHelper.writableDatabase
-                insertWeiboStatuses(db, statuses)
+                insertWeiboStatuses(statuses)
                 prefetchImages(statuses)
                 _weiboDatabaseUpdates.emit(Unit)
             }
@@ -1348,115 +1081,46 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         }
     }
 
-    private fun queryLocalWeibos(): List<WeiboTimelineStatus> {
-        val db = dbHelper.readableDatabase
-        val cursor = db.query(
-            MessageDbHelper.TABLE_WEIBO,
-            null,
-            null,
-            null,
-            null, null,
-            "${MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG} DESC"
-        )
-        val list = mutableListOf<WeiboTimelineStatus>()
+    private suspend fun queryLocalWeibos(): List<WeiboTimelineStatus> {
+        val entities = weiboDao.getAllWeibosList()
         val gson = Gson()
-        cursor.use {
-            while (it.moveToNext()) {
-                val isGap = it.getInt(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_IS_GAP))
-                if (isGap == 1) {
-                    val gapId = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_ID))
-                    val sinceId = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_GAP_SINCE_ID))
-                    val maxId = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID))
-                    val createdAtLong = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG))
-                    val gapStatus = WeiboTimelineStatus(
-                        id = gapId,
-                        idstr = gapId.toString(),
-                        created_at = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US).format(Date(createdAtLong)),
-                        raw_text = "__GAP__:$sinceId:$maxId",
-                        text_raw = "__GAP__:$sinceId:$maxId",
-                        text = "__GAP__:$sinceId:$maxId",
-                        source = null,
-                        isLongText = false,
-                        user = null,
-                        pic_ids = null,
-                        pic_infos = null,
-                        retweeted_status = null,
-                        page_info = null,
-                        reposts_count = null,
-                        comments_count = null,
-                        attitudes_count = null
-                    )
-                    list.add(gapStatus)
-                } else {
-                    val json = it.getString(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_JSON))
-                    try {
-                        val status = gson.fromJson(json, WeiboTimelineStatus::class.java)
-                        list.add(status)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-            }
-        }
-        return list
-    }
-
-    private fun getLocalNewestWeiboId(): Long {
-        val db = dbHelper.readableDatabase
-        val cursor = db.query(
-            MessageDbHelper.TABLE_WEIBO,
-            arrayOf("MAX(${MessageDbHelper.COLUMN_WEIBO_ID})"),
-            "${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0",
-            null, null, null, null
-        )
-        var maxId = 0L
-        cursor.use {
-            if (it.moveToFirst()) {
-                maxId = it.getLong(0)
-            }
-        }
-        return maxId
-    }
-
-    private fun getLocalOldestWeiboId(): Long {
-        val db = dbHelper.readableDatabase
-        val cursor = db.query(
-            MessageDbHelper.TABLE_WEIBO,
-            arrayOf("MIN(${MessageDbHelper.COLUMN_WEIBO_ID})"),
-            "${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0",
-            null, null, null, null
-        )
-        var minId = 0L
-        cursor.use {
-            if (it.moveToFirst()) {
-                minId = it.getLong(0)
-            }
-        }
-        return minId
-    }
-
-    private fun insertWeiboStatuses(db: SQLiteDatabase, statuses: List<WeiboTimelineStatus>) {
-        val gson = Gson()
-        db.beginTransaction()
-        try {
-            for (status in statuses) {
-                val statusId = status.id ?: status.idstr?.toLongOrNull() ?: continue
-                val values = ContentValues().apply {
-                    put(MessageDbHelper.COLUMN_WEIBO_ID, statusId)
-                    put(MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG, parseWeiboCreatedAt(status.created_at))
-                    put(MessageDbHelper.COLUMN_WEIBO_JSON, gson.toJson(status))
-                    put(MessageDbHelper.COLUMN_WEIBO_IS_GAP, 0)
-                }
-                db.insertWithOnConflict(
-                    MessageDbHelper.TABLE_WEIBO,
-                    null,
-                    values,
-                    SQLiteDatabase.CONFLICT_REPLACE
+        return entities.mapNotNull { entity ->
+            if (entity.isGap == 1) {
+                WeiboTimelineStatus(
+                    id = entity.id,
+                    idstr = entity.id.toString(),
+                    created_at = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US).format(Date(entity.createdAtLong)),
+                    raw_text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
+                    text_raw = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
+                    text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
+                    source = null, isLongText = false, user = null,
+                    pic_ids = null, pic_infos = null, retweeted_status = null,
+                    page_info = null, reposts_count = null, comments_count = null, attitudes_count = null
                 )
+            } else {
+                try {
+                    gson.fromJson(entity.contentJson, WeiboTimelineStatus::class.java)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    null
+                }
             }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+        }
+    }
+
+    private suspend fun insertWeiboStatuses(statuses: List<WeiboTimelineStatus>) {
+        val gson = Gson()
+        val entities = statuses.mapNotNull { status ->
+            val statusId = status.id ?: status.idstr?.toLongOrNull() ?: return@mapNotNull null
+            WeiboEntity(
+                id = statusId,
+                createdAtLong = parseWeiboCreatedAt(status.created_at),
+                contentJson = gson.toJson(status),
+                isGap = 0
+            )
+        }
+        if (entities.isNotEmpty()) {
+            weiboDao.insertOrReplaceAll(entities)
         }
     }
 
@@ -1498,33 +1162,12 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         }
     }
 
-    private fun pruneOldWeibos() {
-        val db = dbHelper.writableDatabase
+    private suspend fun pruneOldWeibos() {
         val sevenDaysAgo = System.currentTimeMillis() - (7L * 24 * 60 * 60 * 1000)
-        db.delete(
-            MessageDbHelper.TABLE_WEIBO,
-            "${MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG} < ? AND ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0",
-            arrayOf(sevenDaysAgo.toString())
-        )
-        
-        val countCursor = db.rawQuery("SELECT COUNT(*) FROM ${MessageDbHelper.TABLE_WEIBO} WHERE ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0", null)
-        var count = 0
-        countCursor.use {
-            if (it.moveToFirst()) {
-                count = it.getInt(0)
-            }
-        }
+        weiboDao.deleteOlderThan(sevenDaysAgo)
+        val count = weiboDao.countNonGap()
         if (count > 2000) {
-            val limit = count - 2000
-            db.execSQL("""
-                DELETE FROM ${MessageDbHelper.TABLE_WEIBO} 
-                WHERE ${MessageDbHelper.COLUMN_WEIBO_ID} IN (
-                    SELECT ${MessageDbHelper.COLUMN_WEIBO_ID} FROM ${MessageDbHelper.TABLE_WEIBO} 
-                    WHERE ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0 
-                    ORDER BY ${MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG} ASC 
-                    LIMIT $limit
-                )
-            """.trimIndent())
+            weiboDao.deleteOldest(count - 2000)
         }
     }
 

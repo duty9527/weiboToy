@@ -3084,6 +3084,8 @@ fun ZoomableImage(
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     val context = LocalContext.current
+    // null = unknown yet, true = tall image (use FillWidth + scroll), false = normal image (use Fit + center)
+    var isLongImage by remember(url) { mutableStateOf<Boolean?>(null) }
 
     val imageModel = remember(url, cookie, useOriginalSize) {
         coil.request.ImageRequest.Builder(context)
@@ -3100,6 +3102,10 @@ fun ZoomableImage(
             .build()
     }
 
+    val screenHeight = context.resources.displayMetrics.heightPixels
+    val screenWidth = context.resources.displayMetrics.widthPixels
+    val longImageThreshold = (screenHeight.toFloat() / screenWidth) * 1.2f
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -3107,7 +3113,7 @@ fun ZoomableImage(
                 detectTapGestures(
                     onTap = { onDismiss() },
                     onDoubleTap = { pos ->
-                        if (useOriginalSize) return@detectTapGestures
+                        if (useOriginalSize && isLongImage != true) return@detectTapGestures
                         if (scale > 1f) {
                             scale = 1f
                             offset = androidx.compose.ui.geometry.Offset.Zero
@@ -3122,18 +3128,55 @@ fun ZoomableImage(
             }
     ) {
         if (useOriginalSize) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-            ) {
+            val longImage = isLongImage
+            if (longImage == true) {
+                // Long image: fill width, scrollable from top to bottom
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    SubcomposeAsyncImage(
+                        model = imageModel,
+                        contentDescription = "Zoomable Image",
+                        contentScale = ContentScale.FillWidth,
+                        loading = {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().height(300.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(color = Color(0xFFF97316))
+                            }
+                        },
+                        error = {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().height(300.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("图片加载失败", color = TextGrey, fontSize = 14.sp)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().wrapContentHeight(),
+                        onSuccess = { state ->
+                            val intrinsicSize = state.painter.intrinsicSize
+                            if (intrinsicSize.height > 0 && intrinsicSize.width > 0) {
+                                val ratio = intrinsicSize.height / intrinsicSize.width
+                                if (isLongImage == null) {
+                                    isLongImage = ratio > longImageThreshold
+                                }
+                            }
+                        }
+                    )
+                }
+            } else {
+                // Normal image: fit and center
                 SubcomposeAsyncImage(
                     model = imageModel,
                     contentDescription = "Zoomable Image",
-                    contentScale = ContentScale.FillWidth,
+                    contentScale = ContentScale.Fit,
                     loading = {
                         Box(
-                            modifier = Modifier.fillMaxWidth().height(300.dp),
+                            modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center
                         ) {
                             CircularProgressIndicator(color = Color(0xFFF97316))
@@ -3141,13 +3184,24 @@ fun ZoomableImage(
                     },
                     error = {
                         Box(
-                            modifier = Modifier.fillMaxWidth().height(300.dp),
+                            modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center
                         ) {
                             Text("图片加载失败", color = TextGrey, fontSize = 14.sp)
                         }
                     },
-                    modifier = Modifier.fillMaxWidth().wrapContentHeight()
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .align(Alignment.Center),
+                    onSuccess = { state ->
+                        val intrinsicSize = state.painter.intrinsicSize
+                        if (intrinsicSize.height > 0 && intrinsicSize.width > 0) {
+                            val ratio = intrinsicSize.height / intrinsicSize.width
+                            if (isLongImage == null) {
+                                isLongImage = ratio > longImageThreshold
+                            }
+                        }
+                    }
                 )
             }
         } else {

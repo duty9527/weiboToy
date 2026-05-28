@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.weibochat.data.DataRepository
 import com.example.weibochat.data.Message
+import com.example.weibochat.data.BlockedKeywordRule
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -77,6 +78,14 @@ class MainScreenViewModel(private val dataRepository: DataRepository) : ViewMode
 
     fun saveBlockedKeywords(keywords: String) {
         dataRepository.saveBlockedKeywords(keywords)
+    }
+
+    fun getBlockedKeywordRules(): List<BlockedKeywordRule> {
+        return dataRepository.getBlockedKeywordRules()
+    }
+
+    fun saveBlockedKeywordRules(rules: List<BlockedKeywordRule>) {
+        dataRepository.saveBlockedKeywordRules(rules)
     }
 
     fun getBlockedUsersString(): String {

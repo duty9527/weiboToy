@@ -36,6 +36,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
 import com.example.weibochat.data.Message
 import com.example.weibochat.data.WeiboTimelineStatus
+import com.example.weibochat.data.BlockedKeywordRule
+import com.example.weibochat.data.MatchMode
 import com.example.weibochat.data.cleanWeiboHtmlText
 import kotlinx.coroutines.flow.distinctUntilChanged
 import com.example.weibochat.theme.*
@@ -51,6 +53,9 @@ import coil.request.ImageRequest
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import com.example.weibochat.data.parseMessageContent
@@ -509,7 +514,7 @@ fun MainScreen(
         }
         
         if (showSettingsDialog) {
-            var blockedKeywordsText by remember { mutableStateOf(viewModel.getBlockedKeywordsString()) }
+            var blockedRules by remember { mutableStateOf(viewModel.getBlockedKeywordRules().toMutableList()) }
             var blockedUsersText by remember { mutableStateOf(viewModel.getBlockedUsersString()) }
 
             AlertDialog(
@@ -517,20 +522,81 @@ fun MainScreen(
                 title = { Text("群聊设置与工具", color = Color.White) },
                 text = {
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        Text("屏蔽关键字 (以逗号或中文逗号分隔):", color = TextGrey, fontSize = 12.sp)
+                        Text("屏蔽关键字:", color = TextGrey, fontSize = 12.sp)
                         Spacer(modifier = Modifier.height(4.dp))
-                        TextField(
-                            value = blockedKeywordsText,
-                            onValueChange = { blockedKeywordsText = it },
-                            placeholder = { Text("例如：撤回了一条消息,红包", color = TextGrey, fontSize = 12.sp) },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = InputBg,
-                                unfocusedContainerColor = InputBg,
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White
-                            )
-                        )
+
+                        blockedRules.forEachIndexed { index, rule ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                TextField(
+                                    value = rule.text,
+                                    onValueChange = { newText ->
+                                        blockedRules = blockedRules.toMutableList().also {
+                                            it[index] = rule.copy(text = newText)
+                                        }
+                                    },
+                                    placeholder = { Text("关键字", color = TextGrey, fontSize = 11.sp) },
+                                    modifier = Modifier.weight(1f),
+                                    singleLine = true,
+                                    colors = TextFieldDefaults.colors(
+                                        focusedContainerColor = InputBg,
+                                        unfocusedContainerColor = InputBg,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    )
+                                )
+
+                                var expanded by remember { mutableStateOf(false) }
+                                Box {
+                                    TextButton(
+                                        onClick = { expanded = true },
+                                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Text(rule.mode.label, color = AccentGreen, fontSize = 10.sp)
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = AccentGreen, modifier = Modifier.size(14.dp))
+                                    }
+                                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                                        MatchMode.entries.forEach { mode ->
+                                            DropdownMenuItem(
+                                                text = { Text(mode.label, fontSize = 12.sp) },
+                                                onClick = {
+                                                    blockedRules = blockedRules.toMutableList().also {
+                                                        it[index] = rule.copy(mode = mode)
+                                                    }
+                                                    expanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        blockedRules = blockedRules.toMutableList().also { it.removeAt(index) }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除", tint = Color(0xFFE57373), modifier = Modifier.size(16.dp))
+                                }
+                            }
+                            if (index < blockedRules.lastIndex) Spacer(modifier = Modifier.height(2.dp))
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(
+                            onClick = {
+                                blockedRules = blockedRules.toMutableList().also {
+                                    it.add(BlockedKeywordRule("", MatchMode.CONTAINS))
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "添加", tint = AccentGreen, modifier = Modifier.size(16.dp))
+                            Text("添加规则", color = AccentGreen, fontSize = 12.sp)
+                        }
 
                         Spacer(modifier = Modifier.height(12.dp))
                         Text("屏蔽用户 (以逗号或中文逗号分隔):", color = TextGrey, fontSize = 12.sp)
@@ -629,7 +695,8 @@ fun MainScreen(
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            viewModel.saveBlockedKeywords(blockedKeywordsText)
+                            val validRules = blockedRules.filter { it.text.isNotBlank() }
+                            viewModel.saveBlockedKeywordRules(validRules)
                             viewModel.saveBlockedUsers(blockedUsersText)
                             showSettingsDialog = false
                         }

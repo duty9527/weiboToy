@@ -21,6 +21,9 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import com.google.gson.Gson
+import coil.request.ImageRequest
+import coil.request.CachePolicy
 
 interface DataRepository {
     val allMessages: Flow<List<Message>>
@@ -49,7 +52,8 @@ interface DataRepository {
     suspend fun syncMessagesUntil(targetTimeMillis: Long): Int
     suspend fun fetchFriendsTimeline(
         listId: String = DEFAULT_WEIBO_TIMELINE_LIST_ID,
-        maxId: Long? = null
+        maxId: Long? = null,
+        sinceId: Long? = null
     ): WeiboTimelineResponse?
     suspend fun fetchWeiboStatusLongText(statusId: String): String?
     suspend fun fetchWeiboStatus(statusId: String): WeiboTimelineStatus?
@@ -61,15 +65,22 @@ interface DataRepository {
     suspend fun unlikeWeiboStatus(statusId: String): Boolean
     fun markWeiboStatusAsRead(statusId: String)
     fun getReadWeiboStatusIds(): Set<String>
+    fun getLocalTimeline(): Flow<List<WeiboTimelineStatus>>
+    suspend fun syncNewTimeline(): Result<Unit>
+    suspend fun syncGap(gapId: Long): Result<Unit>
+    suspend fun loadMoreTimeline(): Result<Unit>
+    fun saveLastViewedWeibo(statusId: String, index: Int, offset: Int)
+    fun getLastViewedWeibo(): Triple<String, Int, Int>?
 }
 
-class DefaultDataRepository(context: Context) : DataRepository {
+class DefaultDataRepository(private val context: Context) : DataRepository {
     private val dbHelper = MessageDbHelper(context)
     private val apiClient = WeiboApiClient(context)
     private val sharedPrefs: SharedPreferences = context.getSharedPreferences("weibo_prefs", Context.MODE_PRIVATE)
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _databaseUpdates = MutableSharedFlow<Unit>(replay = 1)
+    private val _weiboDatabaseUpdates = MutableSharedFlow<Unit>(replay = 1)
     private val activeGroupIdFlow = MutableStateFlow<String?>(null)
     private var isPolling = false
     
@@ -763,7 +774,8 @@ class DefaultDataRepository(context: Context) : DataRepository {
 
     override suspend fun fetchFriendsTimeline(
         listId: String,
-        maxId: Long?
+        maxId: Long?,
+        sinceId: Long?
     ): WeiboTimelineResponse? {
         val cookie = getMobileApiCookie()
         if (cookie.isNotBlank()) {
@@ -771,6 +783,7 @@ class DefaultDataRepository(context: Context) : DataRepository {
                 cookie = cookie,
                 listId = listId,
                 maxId = maxId,
+                sinceId = sinceId,
                 onCookieUpdated = { newCookie ->
                     saveMobileCookie(newCookie)
                 }
@@ -1156,5 +1169,377 @@ class DefaultDataRepository(context: Context) : DataRepository {
 
     private fun oldTimeMillisToBreak(oldestTimeMillis: Long, targetTimeMillis: Long): Boolean {
         return oldestTimeMillis <= targetTimeMillis
+    }
+
+    override fun markWeiboStatusAsRead(statusId: String) {
+        val current = getReadWeiboStatusIds().toMutableSet()
+        if (current.add(statusId)) {
+            if (current.size > 1000) {
+                val list = current.toList()
+                val pruned = list.drop(current.size - 1000).toSet()
+                sharedPrefs.edit().putStringSet("read_weibo_ids", pruned).apply()
+            } else {
+                sharedPrefs.edit().putStringSet("read_weibo_ids", current).apply()
+            }
+        }
+    }
+
+    override fun getReadWeiboStatusIds(): Set<String> {
+        return sharedPrefs.getStringSet("read_weibo_ids", emptySet()) ?: emptySet()
+    }
+
+    override fun getLocalTimeline(): Flow<List<WeiboTimelineStatus>> {
+        return _weiboDatabaseUpdates.onStart { emit(Unit) }
+            .map {
+                queryLocalWeibos()
+            }
+            .flowOn(Dispatchers.IO)
+    }
+
+    override suspend fun syncNewTimeline(): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val localNewestId = getLocalNewestWeiboId()
+            val response = fetchFriendsTimeline(sinceId = localNewestId)
+                ?: return@withContext Result.failure(Exception("Failed to fetch timeline from network"))
+            if (response.ok != 1) {
+                return@withContext Result.failure(Exception(response.msg ?: "Network response not OK"))
+            }
+            
+            val statuses = response.statuses.orEmpty()
+            if (statuses.isNotEmpty()) {
+                val db = dbHelper.writableDatabase
+                
+                val oldestStatus = statuses.minByOrNull { it.id ?: it.idstr?.toLongOrNull() ?: Long.MAX_VALUE }
+                val oldestId = oldestStatus?.let { it.id ?: it.idstr?.toLongOrNull() }
+                
+                if (localNewestId > 0L && oldestId != null && oldestId > localNewestId && statuses.size >= 15) {
+                    val gapId = oldestId - 1
+                    val gapCreatedAtLong = parseWeiboCreatedAt(oldestStatus.created_at) - 1000L
+                    
+                    val gapValues = ContentValues().apply {
+                        put(MessageDbHelper.COLUMN_WEIBO_ID, gapId)
+                        put(MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG, gapCreatedAtLong)
+                        put(MessageDbHelper.COLUMN_WEIBO_JSON, "")
+                        put(MessageDbHelper.COLUMN_WEIBO_IS_GAP, 1)
+                        put(MessageDbHelper.COLUMN_WEIBO_GAP_SINCE_ID, localNewestId)
+                        put(MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID, oldestId - 1)
+                    }
+                    db.insertWithOnConflict(
+                        MessageDbHelper.TABLE_WEIBO,
+                        null,
+                        gapValues,
+                        SQLiteDatabase.CONFLICT_REPLACE
+                    )
+                }
+                
+                insertWeiboStatuses(db, statuses)
+                prefetchImages(statuses)
+                pruneOldWeibos()
+                
+                _weiboDatabaseUpdates.emit(Unit)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun syncGap(gapId: Long): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val db = dbHelper.writableDatabase
+            var gapSinceId = 0L
+            var gapMaxId = 0L
+            val cursor = db.query(
+                MessageDbHelper.TABLE_WEIBO,
+                arrayOf(MessageDbHelper.COLUMN_WEIBO_GAP_SINCE_ID, MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID),
+                "${MessageDbHelper.COLUMN_WEIBO_ID} = ? AND ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 1",
+                arrayOf(gapId.toString()),
+                null, null, null
+            )
+            cursor.use {
+                if (it.moveToFirst()) {
+                    gapSinceId = it.getLong(0)
+                    gapMaxId = it.getLong(1)
+                }
+            }
+            
+            if (gapSinceId == 0L || gapMaxId == 0L) return@withContext Result.failure(Exception("Gap not found"))
+            
+            var currentMaxId = gapMaxId
+            var loopCount = 0
+            val maxLoops = 10
+            
+            while (currentMaxId > gapSinceId && loopCount < maxLoops) {
+                loopCount++
+                if (loopCount > 1) {
+                    delay(3000)
+                }
+                
+                val response = fetchFriendsTimeline(maxId = currentMaxId) ?: break
+                if (response.ok != 1 || response.statuses.isNullOrEmpty()) {
+                    break
+                }
+                
+                val statuses = response.statuses
+                insertWeiboStatuses(db, statuses)
+                prefetchImages(statuses)
+                
+                val oldestFetchedId = statuses.minOfOrNull { it.id ?: it.idstr?.toLongOrNull() ?: Long.MAX_VALUE } ?: Long.MAX_VALUE
+                if (oldestFetchedId >= currentMaxId) {
+                    break
+                }
+                currentMaxId = oldestFetchedId - 1
+                
+                if (currentMaxId > gapSinceId) {
+                    val values = ContentValues().apply {
+                        put(MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID, currentMaxId)
+                    }
+                    db.update(
+                        MessageDbHelper.TABLE_WEIBO,
+                        values,
+                        "${MessageDbHelper.COLUMN_WEIBO_ID} = ?",
+                        arrayOf(gapId.toString())
+                    )
+                } else {
+                    db.delete(
+                        MessageDbHelper.TABLE_WEIBO,
+                        "${MessageDbHelper.COLUMN_WEIBO_ID} = ?",
+                        arrayOf(gapId.toString())
+                    )
+                }
+                _weiboDatabaseUpdates.emit(Unit)
+            }
+            
+            if (currentMaxId <= gapSinceId) {
+                db.delete(
+                    MessageDbHelper.TABLE_WEIBO,
+                    "${MessageDbHelper.COLUMN_WEIBO_ID} = ?",
+                    arrayOf(gapId.toString())
+                )
+                _weiboDatabaseUpdates.emit(Unit)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun loadMoreTimeline(): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val oldestId = getLocalOldestWeiboId()
+            if (oldestId == 0L) {
+                return@withContext syncNewTimeline()
+            }
+            val response = fetchFriendsTimeline(maxId = oldestId - 1)
+                ?: return@withContext Result.failure(Exception("Failed to fetch older timeline posts"))
+            if (response.ok != 1) {
+                return@withContext Result.failure(Exception(response.msg ?: "Network response not OK"))
+            }
+            val statuses = response.statuses.orEmpty()
+            if (statuses.isNotEmpty()) {
+                val db = dbHelper.writableDatabase
+                insertWeiboStatuses(db, statuses)
+                prefetchImages(statuses)
+                _weiboDatabaseUpdates.emit(Unit)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun queryLocalWeibos(): List<WeiboTimelineStatus> {
+        val db = dbHelper.readableDatabase
+        val cursor = db.query(
+            MessageDbHelper.TABLE_WEIBO,
+            null,
+            null,
+            null,
+            null, null,
+            "${MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG} DESC"
+        )
+        val list = mutableListOf<WeiboTimelineStatus>()
+        val gson = Gson()
+        cursor.use {
+            while (it.moveToNext()) {
+                val isGap = it.getInt(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_IS_GAP))
+                if (isGap == 1) {
+                    val gapId = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_ID))
+                    val sinceId = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_GAP_SINCE_ID))
+                    val maxId = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_GAP_MAX_ID))
+                    val createdAtLong = it.getLong(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG))
+                    val gapStatus = WeiboTimelineStatus(
+                        id = gapId,
+                        idstr = gapId.toString(),
+                        created_at = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US).format(Date(createdAtLong)),
+                        raw_text = "__GAP__:$sinceId:$maxId",
+                        text_raw = "__GAP__:$sinceId:$maxId",
+                        text = "__GAP__:$sinceId:$maxId",
+                        source = null,
+                        isLongText = false,
+                        user = null,
+                        pic_ids = null,
+                        pic_infos = null,
+                        retweeted_status = null,
+                        page_info = null,
+                        reposts_count = null,
+                        comments_count = null,
+                        attitudes_count = null
+                    )
+                    list.add(gapStatus)
+                } else {
+                    val json = it.getString(it.getColumnIndexOrThrow(MessageDbHelper.COLUMN_WEIBO_JSON))
+                    try {
+                        val status = gson.fromJson(json, WeiboTimelineStatus::class.java)
+                        list.add(status)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+        return list
+    }
+
+    private fun getLocalNewestWeiboId(): Long {
+        val db = dbHelper.readableDatabase
+        val cursor = db.query(
+            MessageDbHelper.TABLE_WEIBO,
+            arrayOf("MAX(${MessageDbHelper.COLUMN_WEIBO_ID})"),
+            "${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0",
+            null, null, null, null
+        )
+        var maxId = 0L
+        cursor.use {
+            if (it.moveToFirst()) {
+                maxId = it.getLong(0)
+            }
+        }
+        return maxId
+    }
+
+    private fun getLocalOldestWeiboId(): Long {
+        val db = dbHelper.readableDatabase
+        val cursor = db.query(
+            MessageDbHelper.TABLE_WEIBO,
+            arrayOf("MIN(${MessageDbHelper.COLUMN_WEIBO_ID})"),
+            "${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0",
+            null, null, null, null
+        )
+        var minId = 0L
+        cursor.use {
+            if (it.moveToFirst()) {
+                minId = it.getLong(0)
+            }
+        }
+        return minId
+    }
+
+    private fun insertWeiboStatuses(db: SQLiteDatabase, statuses: List<WeiboTimelineStatus>) {
+        val gson = Gson()
+        db.beginTransaction()
+        try {
+            for (status in statuses) {
+                val statusId = status.id ?: status.idstr?.toLongOrNull() ?: continue
+                val values = ContentValues().apply {
+                    put(MessageDbHelper.COLUMN_WEIBO_ID, statusId)
+                    put(MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG, parseWeiboCreatedAt(status.created_at))
+                    put(MessageDbHelper.COLUMN_WEIBO_JSON, gson.toJson(status))
+                    put(MessageDbHelper.COLUMN_WEIBO_IS_GAP, 0)
+                }
+                db.insertWithOnConflict(
+                    MessageDbHelper.TABLE_WEIBO,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_REPLACE
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun parseWeiboCreatedAt(createdAt: String?): Long {
+        if (createdAt.isNullOrBlank()) return System.currentTimeMillis()
+        return try {
+            val parser = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US)
+            parser.parse(createdAt)?.time ?: System.currentTimeMillis()
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+
+    private fun prefetchImages(statuses: List<WeiboTimelineStatus>) {
+        val urls = mutableListOf<String>()
+        for (status in statuses) {
+            status.user?.profile_image_url?.let { urls.add(it) }
+            status.pics?.forEach { pic ->
+                pic.large?.url?.let { urls.add(it) }
+                pic.url?.let { urls.add(it) }
+            }
+            status.retweeted_status?.pics?.forEach { pic ->
+                pic.large?.url?.let { urls.add(it) }
+                pic.url?.let { urls.add(it) }
+            }
+        }
+        try {
+            val loader = coil.Coil.imageLoader(context)
+            urls.distinct().forEach { url ->
+                val request = ImageRequest.Builder(context)
+                    .data(url)
+                    .diskCachePolicy(CachePolicy.ENABLED)
+                    .build()
+                loader.enqueue(request)
+            }
+        } catch (e: Exception) {
+            // Ignore Coil initialization exceptions in tests or if loader isn't ready
+            e.printStackTrace()
+        }
+    }
+
+    private fun pruneOldWeibos() {
+        val db = dbHelper.writableDatabase
+        val sevenDaysAgo = System.currentTimeMillis() - (7L * 24 * 60 * 60 * 1000)
+        db.delete(
+            MessageDbHelper.TABLE_WEIBO,
+            "${MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG} < ? AND ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0",
+            arrayOf(sevenDaysAgo.toString())
+        )
+        
+        val countCursor = db.rawQuery("SELECT COUNT(*) FROM ${MessageDbHelper.TABLE_WEIBO} WHERE ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0", null)
+        var count = 0
+        countCursor.use {
+            if (it.moveToFirst()) {
+                count = it.getInt(0)
+            }
+        }
+        if (count > 2000) {
+            val limit = count - 2000
+            db.execSQL("""
+                DELETE FROM ${MessageDbHelper.TABLE_WEIBO} 
+                WHERE ${MessageDbHelper.COLUMN_WEIBO_ID} IN (
+                    SELECT ${MessageDbHelper.COLUMN_WEIBO_ID} FROM ${MessageDbHelper.TABLE_WEIBO} 
+                    WHERE ${MessageDbHelper.COLUMN_WEIBO_IS_GAP} = 0 
+                    ORDER BY ${MessageDbHelper.COLUMN_WEIBO_CREATED_AT_LONG} ASC 
+                    LIMIT $limit
+                )
+            """.trimIndent())
+        }
+    }
+
+    override fun saveLastViewedWeibo(statusId: String, index: Int, offset: Int) {
+        sharedPrefs.edit()
+            .putString("last_viewed_weibo_id", statusId)
+            .putInt("last_viewed_weibo_index", index)
+            .putInt("last_viewed_weibo_offset", offset)
+            .apply()
+    }
+
+    override fun getLastViewedWeibo(): Triple<String, Int, Int>? {
+        val id = sharedPrefs.getString("last_viewed_weibo_id", null) ?: return null
+        val index = sharedPrefs.getInt("last_viewed_weibo_index", 0)
+        val offset = sharedPrefs.getInt("last_viewed_weibo_offset", 0)
+        return Triple(id, index, offset)
     }
 }

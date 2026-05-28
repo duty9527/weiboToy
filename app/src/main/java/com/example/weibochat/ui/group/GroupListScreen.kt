@@ -33,6 +33,9 @@ import com.example.weibochat.data.WeiboContact
 import com.example.weibochat.ui.main.replaceWeiboShortcodes
 import com.example.weibochat.ui.weibo.WeiboTimelineScreen
 import com.example.weibochat.ui.weibo.WeiboTimelineViewModel
+import com.example.weibochat.ui.weibo.RandomRoamingOverlay
+import com.example.weibochat.ui.weibo.TimelineUiState
+import androidx.compose.material.icons.filled.Shuffle
 import com.example.weibochat.ui.weibo.WeiboWebScreen
 import com.example.weibochat.ui.weibo.WEIBO_SEARCH_URL
 import com.example.weibochat.ui.weibo.WeiboMobileCookieSync
@@ -68,6 +71,18 @@ fun GroupListScreen(
     var selectedTab by remember { mutableStateOf(0) }
     var showWeiboSearch by remember { mutableStateOf(false) }
     var showVerificationWebView by remember { mutableStateOf(false) }
+    
+    var showRoaming by remember { mutableStateOf(false) }
+    val timelineUiState by timelineViewModel.uiState.collectAsState()
+    val readStatusIds by timelineViewModel.readStatusIds.collectAsState()
+    val unviewedStatuses = remember(timelineUiState, readStatusIds) {
+        val statuses = (timelineUiState as? TimelineUiState.Success)?.statuses.orEmpty()
+        statuses.filter { status ->
+            val id = status.idstr ?: status.id?.toString()
+            id == null || id !in readStatusIds
+        }
+    }
+    val unreadCount = unviewedStatuses.size
 
     fun loadGroups() {
         android.util.Log.d("GroupListScreen", "loadGroups() called")
@@ -142,6 +157,26 @@ fun GroupListScreen(
                             )
                         }
                     } else {
+                        if (unreadCount > 0) {
+                            TextButton(
+                                onClick = { showRoaming = true },
+                                contentPadding = PaddingValues(horizontal = 4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Shuffle,
+                                    contentDescription = "随机漫游",
+                                    tint = Color(0xFFF97316),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = unreadCount.toString(),
+                                    color = Color(0xFFF97316),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                         IconButton(onClick = { showWeiboSearch = true }) {
                             Icon(
                                 imageVector = Icons.Default.Search,
@@ -159,6 +194,7 @@ fun GroupListScreen(
         bottomBar = {
             var lastWeiboTabClickTime by remember { mutableStateOf(0L) }
             NavigationBar(
+                modifier = Modifier.height(52.dp),
                 containerColor = Color(0xFF0F111A),
                 tonalElevation = 8.dp
             ) {
@@ -168,16 +204,15 @@ fun GroupListScreen(
                     icon = {
                         Icon(
                             imageVector = Icons.Default.ChatBubble,
-                            contentDescription = "消息"
+                            contentDescription = "消息",
+                            modifier = Modifier.size(24.dp)
                         )
                     },
-                    label = { Text("消息") },
+                    label = {},
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color(0xFFF97316),
-                        selectedTextColor = Color(0xFFF97316),
                         indicatorColor = Color(0x1AF97316),
-                        unselectedIconColor = Color(0xFFA0A5C0),
-                        unselectedTextColor = Color(0xFFA0A5C0)
+                        unselectedIconColor = Color(0xFFA0A5C0)
                     )
                 )
                 NavigationBarItem(
@@ -195,16 +230,15 @@ fun GroupListScreen(
                     icon = {
                         Icon(
                             imageVector = Icons.Default.RssFeed,
-                            contentDescription = "微博"
+                            contentDescription = "微博",
+                            modifier = Modifier.size(24.dp)
                         )
                     },
-                    label = { Text("微博") },
+                    label = {},
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color(0xFFF97316),
-                        selectedTextColor = Color(0xFFF97316),
                         indicatorColor = Color(0x1AF97316),
-                        unselectedIconColor = Color(0xFFA0A5C0),
-                        unselectedTextColor = Color(0xFFA0A5C0)
+                        unselectedIconColor = Color(0xFFA0A5C0)
                     )
                 )
             }
@@ -431,6 +465,8 @@ fun GroupListScreen(
                 WeiboTimelineScreen(
                     viewModel = timelineViewModel,
                     repository = repository,
+                    showRoaming = showRoaming,
+                    onShowRoamingChange = { showRoaming = it },
                     modifier = Modifier.fillMaxSize()
                 )
             }

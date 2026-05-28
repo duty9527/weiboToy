@@ -211,7 +211,11 @@ data class WeiboPic(
     val pid: String?,
     val url: String?,
     val large: WeiboPicObject?,
-    val bmiddle: WeiboPicObject?
+    val bmiddle: WeiboPicObject?,
+    val type: String? = null,
+    @com.google.gson.annotations.SerializedName("videoSrc")
+    val videoSrc: String? = null,
+    val duration: Int? = null
 )
 
 data class WeiboUrlStruct(
@@ -965,6 +969,7 @@ class WeiboApiClient(private val context: Context) {
         cookie: String,
         listId: String = DEFAULT_WEIBO_TIMELINE_LIST_ID,
         maxId: Long? = null,
+        sinceId: Long? = null,
         onCookieUpdated: ((String) -> Unit)? = null
     ): WeiboTimelineResponse? = withContext(Dispatchers.IO) {
         var attempts = 0
@@ -988,6 +993,9 @@ class WeiboApiClient(private val context: Context) {
                 if (urlBuilder != null) {
                     if (maxId != null && maxId > 0L) {
                         urlBuilder.addQueryParameter("max_id", maxId.toString())
+                    }
+                    if (sinceId != null && sinceId > 0L) {
+                        urlBuilder.addQueryParameter("since_id", sinceId.toString())
                     }
 
                     val targetUrl = urlBuilder.build()

@@ -54,7 +54,8 @@ private class FakeMyModelRepository : DataRepository {
   override suspend fun syncMessagesUntil(targetTimeMillis: Long): Int = 0
   override suspend fun fetchFriendsTimeline(
     listId: String,
-    maxId: Long?
+    maxId: Long?,
+    sinceId: Long?
   ): WeiboTimelineResponse? = null
   override suspend fun fetchWeiboStatusLongText(statusId: String): String? = null
   override suspend fun fetchWeiboStatus(statusId: String): WeiboTimelineStatus? = null
@@ -64,4 +65,12 @@ private class FakeMyModelRepository : DataRepository {
   override suspend fun fetchWeiboAttitudes(statusId: String, page: Int): com.example.weibochat.data.WeiboAttitudesResponse? = null
   override suspend fun likeWeiboStatus(statusId: String): Boolean = false
   override suspend fun unlikeWeiboStatus(statusId: String): Boolean = false
+  override fun markWeiboStatusAsRead(statusId: String) {}
+  override fun getReadWeiboStatusIds(): Set<String> = emptySet()
+  override fun getLocalTimeline(): Flow<List<WeiboTimelineStatus>> = kotlinx.coroutines.flow.flow { emit(emptyList()) }
+  override suspend fun syncNewTimeline(): Result<Unit> = Result.success(Unit)
+  override suspend fun syncGap(gapId: Long): Result<Unit> = Result.success(Unit)
+  override suspend fun loadMoreTimeline(): Result<Unit> = Result.success(Unit)
+  override fun saveLastViewedWeibo(statusId: String, index: Int, offset: Int) {}
+  override fun getLastViewedWeibo(): Triple<String, Int, Int>? = null
 }

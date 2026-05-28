@@ -154,7 +154,7 @@ fun LoginScreen(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text(
-                    text = "Weibo Chat",
+                    text = "Weibo Toy",
                     fontSize = 28.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,

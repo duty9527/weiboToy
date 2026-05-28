@@ -9,7 +9,7 @@ class MessageDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAM
 
     companion object {
         const val DATABASE_NAME = "weibo_chat.db"
-        const val DATABASE_VERSION = 5
+        const val DATABASE_VERSION = 6
 
         const val TABLE_NAME = "messages"
         const val COLUMN_ID = "id"
@@ -27,6 +27,16 @@ class MessageDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAM
         const val COLUMN_FILE_NAME = "file_name"
         const val COLUMN_GROUP_ID = "group_id"
         const val COLUMN_PARENT_MSG_ID = "parent_msg_id"
+
+        // Weibos table constants
+        const val TABLE_WEIBO = "weibos"
+        const val COLUMN_WEIBO_ID = "id"
+        const val COLUMN_WEIBO_CREATED_AT_LONG = "created_at_long"
+        const val COLUMN_WEIBO_JSON = "content_json"
+        const val COLUMN_WEIBO_IS_READ = "is_read"
+        const val COLUMN_WEIBO_IS_GAP = "is_gap"
+        const val COLUMN_WEIBO_GAP_SINCE_ID = "gap_since_id"
+        const val COLUMN_WEIBO_GAP_MAX_ID = "gap_max_id"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -50,6 +60,19 @@ class MessageDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAM
             )
         """.trimIndent()
         db.execSQL(createTableQuery)
+
+        val createWeiboTableQuery = """
+            CREATE TABLE $TABLE_WEIBO (
+                $COLUMN_WEIBO_ID INTEGER PRIMARY KEY,
+                $COLUMN_WEIBO_CREATED_AT_LONG INTEGER,
+                $COLUMN_WEIBO_JSON TEXT,
+                $COLUMN_WEIBO_IS_READ INTEGER DEFAULT 0,
+                $COLUMN_WEIBO_IS_GAP INTEGER DEFAULT 0,
+                $COLUMN_WEIBO_GAP_SINCE_ID INTEGER,
+                $COLUMN_WEIBO_GAP_MAX_ID INTEGER
+            )
+        """.trimIndent()
+        db.execSQL(createWeiboTableQuery)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -71,6 +94,28 @@ class MessageDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAM
                 currentVersion = 5
             } catch (e: Exception) {
                 e.printStackTrace()
+                db.execSQL("DROP TABLE IF EXISTS $TABLE_NAME")
+                onCreate(db)
+                return
+            }
+        }
+        if (currentVersion < 6) {
+            try {
+                db.execSQL("""
+                    CREATE TABLE $TABLE_WEIBO (
+                        $COLUMN_WEIBO_ID INTEGER PRIMARY KEY,
+                        $COLUMN_WEIBO_CREATED_AT_LONG INTEGER,
+                        $COLUMN_WEIBO_JSON TEXT,
+                        $COLUMN_WEIBO_IS_READ INTEGER DEFAULT 0,
+                        $COLUMN_WEIBO_IS_GAP INTEGER DEFAULT 0,
+                        $COLUMN_WEIBO_GAP_SINCE_ID INTEGER,
+                        $COLUMN_WEIBO_GAP_MAX_ID INTEGER
+                    )
+                """.trimIndent())
+                currentVersion = 6
+            } catch (e: Exception) {
+                e.printStackTrace()
+                db.execSQL("DROP TABLE IF EXISTS $TABLE_WEIBO")
                 db.execSQL("DROP TABLE IF EXISTS $TABLE_NAME")
                 onCreate(db)
                 return

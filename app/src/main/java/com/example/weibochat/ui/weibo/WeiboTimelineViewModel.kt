@@ -43,68 +43,95 @@ class WeiboTimelineViewModel(
     private val _isLoadingMore = MutableStateFlow(false)
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
 
-    private val allStatuses = mutableListOf<WeiboTimelineStatus>()
-    private var nextCursor: Long? = null
-    private var hasMore = true
-    val canLoadMore: Boolean
-        get() = hasMore && nextCursor != null
+    val canLoadMore: Boolean = true
+
+    private val _readStatusIds = MutableStateFlow<Set<String>>(emptySet())
+    val readStatusIds: StateFlow<Set<String>> = _readStatusIds.asStateFlow()
+
+    private val _loadingGaps = MutableStateFlow<Set<Long>>(emptySet())
+    val loadingGaps: StateFlow<Set<Long>> = _loadingGaps.asStateFlow()
 
     init {
+        _readStatusIds.value = repository.getReadWeiboStatusIds()
+        viewModelScope.launch {
+            repository.getLocalTimeline().collect { statuses ->
+                if (statuses.isNotEmpty()) {
+                    _uiState.value = TimelineUiState.Success(statuses)
+                } else {
+                    if (!_isRefreshing.value && _uiState.value is TimelineUiState.Loading) {
+                        refresh()
+                    }
+                }
+            }
+        }
+    }
+
+    fun markAsRead(statusId: String) {
+        viewModelScope.launch {
+            repository.markWeiboStatusAsRead(statusId)
+            _readStatusIds.value = repository.getReadWeiboStatusIds()
+        }
+    }
+
+    fun markAllLoadedAsRead() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            if (state is TimelineUiState.Success) {
+                state.statuses.forEach { status ->
+                    val id = status.idstr ?: status.id?.toString()
+                    if (id != null && status.raw_text?.startsWith("__GAP__:") != true) {
+                        repository.markWeiboStatusAsRead(id)
+                    }
+                }
+                _readStatusIds.value = repository.getReadWeiboStatusIds()
+            }
+        }
     }
 
     fun refresh() {
         if (_isRefreshing.value) return
         _isRefreshing.value = true
-        hasMore = true
         if (_uiState.value !is TimelineUiState.Success) {
             _uiState.value = TimelineUiState.Loading
         }
-        loadTimelinePage(maxId = null, append = false)
+        viewModelScope.launch {
+            val result = repository.syncNewTimeline()
+            _isRefreshing.value = false
+            if (result.isFailure) {
+                val currentList = (uiState.value as? TimelineUiState.Success)?.statuses.orEmpty()
+                if (currentList.isEmpty()) {
+                    _uiState.value = TimelineUiState.Error(
+                        result.exceptionOrNull()?.message ?: "没有拿到最新微博，请确认登录状态后重试"
+                    )
+                }
+            }
+        }
     }
 
     fun loadMore() {
-        if (_isLoadingMore.value || _uiState.value !is TimelineUiState.Success || !hasMore || nextCursor == null) return
-
+        if (_isLoadingMore.value) return
         _isLoadingMore.value = true
-        loadTimelinePage(maxId = nextCursor, append = true)
+        viewModelScope.launch {
+            repository.loadMoreTimeline()
+            _isLoadingMore.value = false
+        }
     }
 
-    private fun loadTimelinePage(maxId: Long?, append: Boolean) {
+    fun fillGap(gapId: Long) {
+        if (_loadingGaps.value.contains(gapId)) return
+        _loadingGaps.value = _loadingGaps.value + gapId
         viewModelScope.launch {
-            val response = repository.fetchFriendsTimeline(
-                listId = listId,
-                maxId = maxId
-            )
-            val statuses = response?.statuses.orEmpty()
-
-            if (append) {
-                val newStatuses = statuses.filter { new ->
-                    allStatuses.none { (it.idstr ?: it.id?.toString()) == (new.idstr ?: new.id?.toString()) }
-                }
-                allStatuses.addAll(newStatuses)
-                hasMore = newStatuses.isNotEmpty()
-            } else {
-                allStatuses.clear()
-                allStatuses.addAll(statuses.distinctBy { it.idstr ?: it.id })
-                hasMore = allStatuses.isNotEmpty()
-            }
-
-            if (statuses.isNotEmpty()) {
-                nextCursor = response?.max_id
-            }
-
-            _isRefreshing.value = false
-            _isLoadingMore.value = false
-
-            if (allStatuses.isNotEmpty()) {
-                _uiState.value = TimelineUiState.Success(allStatuses.toList())
-            } else {
-                _uiState.value = TimelineUiState.Error(
-                    response?.msg?.takeIf { it.isNotBlank() }
-                        ?: "没有拿到最新微博，请确认登录状态后重试"
-                )
-            }
+            repository.syncGap(gapId)
+            _loadingGaps.value = _loadingGaps.value - gapId
         }
+    }
+
+    fun saveLastViewedWeibo(statusId: String, index: Int, offset: Int) {
+        repository.saveLastViewedWeibo(statusId, index, offset)
+    }
+
+    fun getLastViewedWeibo(): Triple<String, Int, Int>? {
+        return repository.getLastViewedWeibo()
     }
 
     // Detail Page Tabs
@@ -367,31 +394,39 @@ class WeiboTimelineViewModel(
 
     fun toggleLikeStatus(statusId: String) {
         viewModelScope.launch {
-            val index = allStatuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
-            if (index != -1) {
-                val oldStatus = allStatuses[index]
-                val currentlyLiked = oldStatus.liked == true
-                val newLiked = !currentlyLiked
-                val countChange = if (newLiked) 1 else -1
-                val newCount = ((oldStatus.attitudes_count ?: 0) + countChange).coerceAtLeast(0)
-                val newStatus = oldStatus.copy(
-                    liked = newLiked,
-                    attitudes_count = newCount
-                )
-                allStatuses[index] = newStatus
-                _uiState.value = TimelineUiState.Success(allStatuses.toList())
+            val currentState = _uiState.value
+            if (currentState is TimelineUiState.Success) {
+                val statuses = currentState.statuses.toMutableList()
+                val index = statuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
+                if (index != -1) {
+                    val oldStatus = statuses[index]
+                    val currentlyLiked = oldStatus.liked == true
+                    val newLiked = !currentlyLiked
+                    val countChange = if (newLiked) 1 else -1
+                    val newCount = ((oldStatus.attitudes_count ?: 0) + countChange).coerceAtLeast(0)
+                    val newStatus = oldStatus.copy(
+                        liked = newLiked,
+                        attitudes_count = newCount
+                    )
+                    statuses[index] = newStatus
+                    _uiState.value = TimelineUiState.Success(statuses)
 
-                val success = if (newLiked) {
-                    repository.likeWeiboStatus(statusId)
-                } else {
-                    repository.unlikeWeiboStatus(statusId)
-                }
+                    val success = if (newLiked) {
+                        repository.likeWeiboStatus(statusId)
+                    } else {
+                        repository.unlikeWeiboStatus(statusId)
+                    }
 
-                if (!success) {
-                    val revertIndex = allStatuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
-                    if (revertIndex != -1) {
-                        allStatuses[revertIndex] = oldStatus
-                        _uiState.value = TimelineUiState.Success(allStatuses.toList())
+                    if (!success) {
+                        val revertState = _uiState.value
+                        if (revertState is TimelineUiState.Success) {
+                            val revertStatuses = revertState.statuses.toMutableList()
+                            val revertIndex = revertStatuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
+                            if (revertIndex != -1) {
+                                revertStatuses[revertIndex] = oldStatus
+                                _uiState.value = TimelineUiState.Success(revertStatuses)
+                            }
+                        }
                     }
                 }
             }

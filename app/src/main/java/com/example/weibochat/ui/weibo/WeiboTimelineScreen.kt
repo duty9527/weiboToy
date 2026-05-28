@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.widget.MediaController
 import android.widget.VideoView
 import java.util.Locale
+import kotlin.math.abs
 import android.app.DownloadManager
 import android.content.Context
 import android.os.Environment
@@ -13,9 +14,11 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -23,15 +26,35 @@ import androidx.compose.foundation.gestures.calculateCentroidSize
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.animate
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
@@ -54,6 +77,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -101,19 +125,32 @@ import kotlinx.coroutines.launch
 fun WeiboTimelineScreen(
     viewModel: WeiboTimelineViewModel,
     repository: DataRepository,
+    showRoaming: Boolean = false,
+    onShowRoamingChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val isRefreshing by viewModel.isRefreshing.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
+    val readStatusIds by viewModel.readStatusIds.collectAsState()
     
     var activePreviewImages by remember { mutableStateOf<Pair<List<String>, Int>?>(null) }
+
     var activeVideoUrl by remember { mutableStateOf<String?>(null) }
     var activeWebUrl by remember { mutableStateOf<String?>(null) }
     var activeDetailStatus by remember { mutableStateOf<WeiboTimelineStatus?>(null) }
     var isDetailLoading by remember { mutableStateOf(false) }
+    val unviewedStatuses = remember(uiState, readStatusIds) {
+        val statuses = (uiState as? TimelineUiState.Success)?.statuses.orEmpty()
+        statuses.filter { status ->
+            val id = status.idstr ?: status.id?.toString()
+            id == null || id !in readStatusIds
+        }
+    }
     val coroutineScope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
+    val context = LocalContext.current
+
 
     LaunchedEffect(Unit) {
         if (uiState is TimelineUiState.Loading) {
@@ -227,6 +264,30 @@ fun WeiboTimelineScreen(
                     }
                 }
 
+                // Save last viewed position when scroll stops, avoiding stale state and high-frequency writes
+                val currentStatuses by rememberUpdatedState(state.statuses)
+                LaunchedEffect(listState) {
+                    snapshotFlow {
+                        if (!listState.isScrollInProgress) {
+                            val index = listState.firstVisibleItemIndex
+                            val offset = listState.firstVisibleItemScrollOffset
+                            val status = currentStatuses.getOrNull(index)
+                            val statusId = status?.let { it.idstr ?: it.id?.toString() }
+                            if (statusId != null && status.raw_text?.startsWith("__GAP__:") != true) {
+                                Triple(statusId, index, offset)
+                            } else {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+                    }.collect { triple ->
+                        if (triple != null) {
+                            viewModel.saveLastViewedWeibo(triple.first, triple.second, triple.third)
+                        }
+                    }
+                }
+
                 val pullToRefreshState = rememberPullToRefreshState()
 
                 PullToRefreshBox(
@@ -250,19 +311,40 @@ fun WeiboTimelineScreen(
                         contentPadding = PaddingValues(bottom = 80.dp)
                     ) {
                         items(state.statuses, key = { it.idstr ?: it.hashCode().toString() }) { status ->
-                            WeiboCard(
-                                status = status,
-                                onImageClick = { index, urls -> activePreviewImages = Pair(urls, index) },
-                                onVideoClick = { url -> activeVideoUrl = url },
-                                onWebClick = ::handleWebClick,
-                                onOpenDetail = { openStatusDetail(it) },
-                                onLikeClick = {
-                                    val requestStatusId = statusId(status)
-                                    if (requestStatusId != null) {
-                                        viewModel.toggleLikeStatus(requestStatusId)
+                            val isGap = status.raw_text?.startsWith("__GAP__:") == true
+                            if (isGap) {
+                                val gapId = status.id ?: 0L
+                                val loadingGaps by viewModel.loadingGaps.collectAsState()
+                                val isGapLoading = loadingGaps.contains(gapId)
+                                WeiboGapCard(
+                                    gapStatus = status,
+                                    isLoading = isGapLoading,
+                                    onFillGap = { viewModel.fillGap(gapId) }
+                                )
+                            } else {
+                                val statusId = status.idstr ?: status.id?.toString()
+                                if (statusId != null) {
+                                    LaunchedEffect(statusId) {
+                                        viewModel.markAsRead(statusId)
                                     }
                                 }
-                            )
+                                val isRead = statusId != null && readStatusIds.contains(statusId)
+                                WeiboCard(
+                                    status = status,
+                                    isRead = isRead,
+                                    onImageClick = { index, urls -> activePreviewImages = Pair(urls, index) },
+                                    onVideoClick = { url -> activeVideoUrl = url },
+                                    onWebClick = ::handleWebClick,
+                                    onOpenDetail = { openStatusDetail(it) },
+                                    onLikeClick = {
+                                        val requestStatusId = statusId(status)
+                                        if (requestStatusId != null) {
+                                            viewModel.toggleLikeStatus(requestStatusId)
+                                        }
+                                    },
+
+                                )
+                            }
                             Spacer(modifier = Modifier.height(8.dp))
                         }
                         
@@ -302,6 +384,47 @@ fun WeiboTimelineScreen(
                             }
                         }
                     }
+
+                    // Floating button to return to last viewed position
+                    var hasScrolledToLastViewed by remember { mutableStateOf(false) }
+                    val lastViewed = remember { viewModel.getLastViewedWeibo() }
+                    
+                    if (lastViewed != null && !hasScrolledToLastViewed && state.statuses.isNotEmpty() && listState.firstVisibleItemIndex == 0) {
+                        val targetIndex = state.statuses.indexOfFirst { 
+                            val id = it.idstr ?: it.id?.toString()
+                            id == lastViewed.first 
+                        }
+                        if (targetIndex > 0) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 16.dp),
+                                contentAlignment = Alignment.TopCenter
+                            ) {
+                                Button(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            listState.scrollToItem(targetIndex, lastViewed.third)
+                                            hasScrolledToLastViewed = true
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF97316)),
+                                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowUpward,
+                                            contentDescription = "回到上次阅读",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("回到上次阅读位置", color = Color.White, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -330,6 +453,7 @@ fun WeiboTimelineScreen(
             )
         }
 
+
         activeVideoUrl?.let { videoUrl ->
             VideoPreviewDialog(
                 videoUrl = videoUrl,
@@ -343,6 +467,28 @@ fun WeiboTimelineScreen(
                 repository = repository,
                 onDismiss = { activeWebUrl = null }
             )
+        }
+
+        if (showRoaming) {
+            Dialog(
+                onDismissRequest = { onShowRoamingChange(false) },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    decorFitsSystemWindows = false
+                )
+            ) {
+                RandomRoamingOverlay(
+                    unviewedStatuses = unviewedStatuses,
+                    readStatusIds = readStatusIds,
+                    onDismiss = { onShowRoamingChange(false) },
+                    onMarkAsRead = { viewModel.markAsRead(it) },
+                    onMarkAllAsRead = { viewModel.markAllLoadedAsRead() },
+                    onImageClick = { index, urls -> activePreviewImages = Pair(urls, index) },
+                    onVideoClick = { url -> activeVideoUrl = url },
+                    onWebClick = ::handleWebClick,
+                    onOpenDetail = { openStatusDetail(it) }
+                )
+            }
         }
     }
 }
@@ -413,9 +559,8 @@ fun WeiboSkeletonList() {
         }
     }
 }
-
 @Composable
-fun WeiboCard(
+fun WeiboCardContent(
     status: WeiboTimelineStatus,
     onImageClick: (Int, List<String>) -> Unit,
     onVideoClick: (String) -> Unit,
@@ -432,202 +577,246 @@ fun WeiboCard(
     val sourceClean = status.source?.replace(Regex("<[^>]*>"), "") ?: ""
     val detailUrl = statusDetailUrl(contentStatus)
 
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(14.dp)
+    ) {
+        // Header Row: Avatar, ScreenName, Meta Details
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = Modifier.size(42.dp)) {
+                AsyncImage(
+                    model = avatarUrl ?: "https://tvax1.sinaimg.cn/crop.0.0.100.100.180/default_avatar.jpg",
+                    contentDescription = screenName,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .border(1.dp, Color(0x33FFFFFF), CircleShape),
+                    contentScale = ContentScale.Crop
+                )
+                
+                // Orange Verified V badge for key accounts or verified users
+                if (screenName.contains("科技") || screenName.contains("人民网") || screenName.contains("爱范儿") || screenName.contains("公园")) {
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .background(Color(0xFFF97316), CircleShape)
+                            .border(1.dp, BubbleBg, CircleShape)
+                            .align(Alignment.BottomEnd),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "V",
+                            color = Color.White,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = screenName,
+                    color = if (screenName.contains("科技") || screenName.contains("人民网") || screenName.contains("爱范儿") || screenName.contains("公园")) Color(0xFFF97316) else TextWhite,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = formatWeiboCreatedAt(createdAt),
+                        color = TextGrey,
+                        fontSize = 11.sp,
+                        maxLines = 1
+                    )
+                    if (sourceClean.isNotBlank()) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = sourceClean,
+                            color = TextGrey,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        val locationName = remember(contentStatus) { getStatusLocation(contentStatus) }
+        WeiboRichText(
+            html = contentStatus.text ?: contentStatus.text_raw ?: contentStatus.raw_text ?: "",
+            fontSize = 15,
+            lineHeight = 22,
+            detailUrl = detailUrl,
+            urlStruct = contentStatus.url_struct,
+            locationName = locationName,
+            isMarkdown = contentStatus.md_render_mark == 1 || contentStatus.md_render_mark == 2 || contentStatus.style_config?.md_render_mark == 1 || contentStatus.style_config?.md_render_mark == 2,
+            onImageClick = onImageClick,
+            onWebClick = onWebClick,
+            onDetailClick = { onOpenDetail(contentStatus) },
+            statusPageInfo = contentStatus.page_info
+        )
+
+        val isRetweet = contentStatus.retweeted_status != null
+        WeiboMediaAndLinksSection(
+            status = contentStatus,
+            isRetweet = isRetweet,
+            onImageClick = onImageClick,
+            onVideoClick = onVideoClick,
+            onWebClick = onWebClick
+        )
+
+        // Retweeted status block if present
+        contentStatus.retweeted_status?.let { retweet ->
+            Spacer(modifier = Modifier.height(10.dp))
+            RetweetedBlock(
+                retweet = retweet,
+                onImageClick = onImageClick,
+                onVideoClick = onVideoClick,
+                onWebClick = onWebClick,
+                onOpenDetail = onOpenDetail
+            )
+        }
+
+        val location = remember(contentStatus) { getStatusLocation(contentStatus) }
+        if (!location.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Place,
+                    contentDescription = "定位",
+                    tint = Color(0xFF60A5FA),
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = location,
+                    color = Color(0xFF60A5FA),
+                    fontSize = 12.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        HorizontalDivider(color = DividerGrey, thickness = 0.5.dp)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Action Row: Repost, Comment, Like
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceAround
+        ) {
+            ActionButton(
+                icon = Icons.Outlined.Share,
+                label = formatCount(status.reposts_count ?: 0),
+                onClick = {}
+            )
+            ActionButton(
+                icon = Icons.Outlined.ChatBubbleOutline,
+                label = formatCount(status.comments_count ?: 0),
+                onClick = {}
+            )
+            
+            val isLiked = status.liked == true
+            val likeCount = status.attitudes_count ?: 0
+            val scale by animateFloatAsState(
+                targetValue = if (isLiked) 1.3f else 1.0f,
+                animationSpec = tween(durationMillis = 200)
+            )
+            
+            Row(
+                modifier = Modifier
+                    .clickable {
+                        onLikeClick()
+                    }
+                    .padding(8.dp)
+                    .scale(if (isLiked) scale else 1f),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = "点赞",
+                    tint = if (isLiked) Color(0xFFEF4444) else TextGrey,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = formatCount(likeCount),
+                    color = if (isLiked) Color(0xFFEF4444) else TextGrey,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun WeiboGapCard(
+    gapStatus: WeiboTimelineStatus,
+    isLoading: Boolean,
+    onFillGap: () -> Unit
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { 
-                onOpenDetail(contentStatus)
-            },
+            .clickable(enabled = !isLoading) { onFillGap() },
         colors = CardDefaults.cardColors(containerColor = BubbleBg),
-        shape = RoundedCornerShape(0.dp) // Mobile Weibo cards usually span full width without round corners on sides
+        shape = RoundedCornerShape(0.dp)
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp)
+                .padding(vertical = 18.dp, horizontal = 16.dp),
+            contentAlignment = Alignment.Center
         ) {
-            // Header Row: Avatar, ScreenName, Meta Details
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(modifier = Modifier.size(42.dp)) {
-                    AsyncImage(
-                        model = avatarUrl ?: "https://tvax1.sinaimg.cn/crop.0.0.100.100.180/default_avatar.jpg",
-                        contentDescription = screenName,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .clip(CircleShape)
-                            .border(1.dp, Color(0x33FFFFFF), CircleShape),
-                        contentScale = ContentScale.Crop
+            if (isLoading) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = Color(0xFFF97316)
                     )
-                    
-                    // Orange Verified V badge for key accounts or verified users
-                    if (screenName.contains("科技") || screenName.contains("人民网") || screenName.contains("爱范儿") || screenName.contains("公园")) {
-                        Box(
-                            modifier = Modifier
-                                .size(14.dp)
-                                .background(Color(0xFFF97316), CircleShape)
-                                .border(1.dp, BubbleBg, CircleShape)
-                                .align(Alignment.BottomEnd),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "V",
-                                color = Color.White,
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(10.dp))
-
-                Column(
-                    modifier = Modifier.weight(1f)
-                ) {
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = screenName,
-                        color = if (screenName.contains("科技") || screenName.contains("人民网") || screenName.contains("爱范儿") || screenName.contains("公园")) Color(0xFFF97316) else TextWhite,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = formatWeiboCreatedAt(createdAt),
-                            color = TextGrey,
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                        if (sourceClean.isNotBlank()) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = sourceClean,
-                                color = TextGrey,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            val locationName = remember(contentStatus) { getStatusLocation(contentStatus) }
-            WeiboRichText(
-                html = contentStatus.text ?: contentStatus.text_raw ?: contentStatus.raw_text ?: "",
-                fontSize = 15,
-                lineHeight = 22,
-                detailUrl = detailUrl,
-                urlStruct = contentStatus.url_struct,
-                locationName = locationName,
-                isMarkdown = contentStatus.md_render_mark == 1 || contentStatus.md_render_mark == 2 || contentStatus.style_config?.md_render_mark == 1 || contentStatus.style_config?.md_render_mark == 2,
-                onImageClick = onImageClick,
-                onWebClick = onWebClick,
-                onDetailClick = { onOpenDetail(contentStatus) },
-                statusPageInfo = contentStatus.page_info
-            )
-
-            val isRetweet = contentStatus.retweeted_status != null
-            WeiboMediaAndLinksSection(
-                status = contentStatus,
-                isRetweet = isRetweet,
-                onImageClick = onImageClick,
-                onVideoClick = onVideoClick,
-                onWebClick = onWebClick
-            )
-
-            // Retweeted status block if present
-            contentStatus.retweeted_status?.let { retweet ->
-                Spacer(modifier = Modifier.height(10.dp))
-                RetweetedBlock(
-                    retweet = retweet,
-                    onImageClick = onImageClick,
-                    onVideoClick = onVideoClick,
-                    onWebClick = onWebClick,
-                    onOpenDetail = onOpenDetail
-                )
-            }
-
-            val location = remember(contentStatus) { getStatusLocation(contentStatus) }
-            if (!location.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Place,
-                        contentDescription = "定位",
-                        tint = Color(0xFF60A5FA),
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = location,
-                        color = Color(0xFF60A5FA),
-                        fontSize = 12.sp
+                        text = "正在安全获取断档微博，请稍候...",
+                        color = TextGrey,
+                        fontSize = 13.sp
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-            HorizontalDivider(color = DividerGrey, thickness = 0.5.dp)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action Row: Repost, Comment, Like
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceAround
-            ) {
-                ActionButton(
-                    icon = Icons.Outlined.Share,
-                    label = formatCount(status.reposts_count ?: 0),
-                    onClick = {}
-                )
-                ActionButton(
-                    icon = Icons.Outlined.ChatBubbleOutline,
-                    label = formatCount(status.comments_count ?: 0),
-                    onClick = {}
-                )
-                
-                val isLiked = status.liked == true
-                val likeCount = status.attitudes_count ?: 0
-                val scale by animateFloatAsState(
-                    targetValue = if (isLiked) 1.3f else 1.0f,
-                    animationSpec = tween(durationMillis = 200)
-                )
-                
-                Row(
-                    modifier = Modifier
-                        .clickable {
-                            onLikeClick()
-                        }
-                        .padding(8.dp)
-                        .scale(if (isLiked) scale else 1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                        contentDescription = "点赞",
-                        tint = if (isLiked) Color(0xFFEF4444) else TextGrey,
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "填充断档",
+                        tint = Color(0xFFF97316),
                         modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = formatCount(likeCount),
-                        color = if (isLiked) Color(0xFFEF4444) else TextGrey,
-                        fontSize = 12.sp
+                        text = "此处有未加载的微博，点击安全补齐",
+                        color = Color(0xFFF97316),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
@@ -635,6 +824,36 @@ fun WeiboCard(
     }
 }
 
+@Composable
+fun WeiboCard(
+    status: WeiboTimelineStatus,
+    isRead: Boolean = false,
+    onImageClick: (Int, List<String>) -> Unit,
+    onVideoClick: (String) -> Unit,
+    onWebClick: (String) -> Unit,
+    onOpenDetail: (WeiboTimelineStatus) -> Unit,
+    onLikeClick: () -> Unit
+) {
+    val contentStatus = status
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { 
+                onOpenDetail(contentStatus)
+            },
+        colors = CardDefaults.cardColors(containerColor = BubbleBg),
+        shape = RoundedCornerShape(0.dp)
+    ) {
+        WeiboCardContent(
+            status = status,
+            onImageClick = onImageClick,
+            onVideoClick = onVideoClick,
+            onWebClick = onWebClick,
+            onOpenDetail = onOpenDetail,
+            onLikeClick = onLikeClick
+        )
+    }
+}
 @Composable
 fun RetweetedBlock(
     retweet: WeiboTimelineStatus,
@@ -898,6 +1117,229 @@ fun WeiboVideoPlayerPreview(
 }
 
 @Composable
+fun WeiboVideoGrid(
+    videos: List<WeiboPic>,
+    onVideoClick: (String) -> Unit
+) {
+    val count = videos.size
+    val cornerRadius = 4.dp
+
+    @Composable
+    fun VideoCell(video: WeiboPic, modifier: Modifier) {
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(cornerRadius))
+                .clickable { video.videoSrc?.let { onVideoClick(it) } }
+        ) {
+            AsyncImage(
+                model = video.url ?: video.large?.url ?: "",
+                contentDescription = "Video",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(36.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "播放",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+    }
+
+    if (count == 1) {
+        val video = videos.first()
+        Box(
+            modifier = Modifier
+                .wrapContentSize(Alignment.CenterStart)
+                .clip(RoundedCornerShape(cornerRadius))
+                .clickable { video.videoSrc?.let { onVideoClick(it) } }
+        ) {
+            AsyncImage(
+                model = video.url ?: video.large?.url ?: "",
+                contentDescription = "Video",
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .heightIn(max = 360.dp),
+                contentScale = ContentScale.Crop
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(48.dp)
+                    .background(Color(0x99000000), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "播放",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+        }
+    } else if (count <= 3) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            for (i in 0 until count) {
+                VideoCell(
+                    video = videos[i],
+                    modifier = Modifier
+                        .weight(1f)
+                        .aspectRatio(1f)
+                )
+            }
+        }
+    } else if (count <= 5) {
+        val columns = 2
+        val rows = 2
+        val maxVisible = 4
+        val remaining = count - maxVisible
+
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            for (r in 0 until rows) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    for (c in 0 until columns) {
+                        val index = r * columns + c
+                        if (index < maxVisible) {
+                            val isLastVisible = index == maxVisible - 1 && remaining > 0
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(cornerRadius))
+                                    .clickable { videos[index].videoSrc?.let { onVideoClick(it) } }
+                            ) {
+                                AsyncImage(
+                                    model = videos[index].url ?: videos[index].large?.url ?: "",
+                                    contentDescription = "Video $index",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .size(36.dp)
+                                        .background(Color(0x99000000), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "播放",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                if (isLastVisible) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color(0x80000000)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "+$remaining",
+                                            color = Color.White,
+                                            fontSize = 22.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        val maxVisible = when {
+            count == 6 -> 6
+            count == 9 -> 9
+            count <= 8 -> 6
+            else -> 9
+        }
+        val remaining = count - maxVisible
+        val columns = 3
+        val rows = (maxVisible + columns - 1) / columns
+
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            for (r in 0 until rows) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    for (c in 0 until columns) {
+                        val index = r * columns + c
+                        if (index < maxVisible) {
+                            val isLastVisible = index == maxVisible - 1 && remaining > 0
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .aspectRatio(1f)
+                                    .clip(RoundedCornerShape(cornerRadius))
+                                    .clickable { videos[index].videoSrc?.let { onVideoClick(it) } }
+                            ) {
+                                AsyncImage(
+                                    model = videos[index].url ?: videos[index].large?.url ?: "",
+                                    contentDescription = "Video $index",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .size(36.dp)
+                                        .background(Color(0x99000000), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "播放",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                if (isLastVisible) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(Color(0x80000000)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "+$remaining",
+                                            color = Color.White,
+                                            fontSize = 22.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun WeiboVideoPreview(
     pageInfo: WeiboTimelinePageInfo,
     onVideoClick: (String) -> Unit,
@@ -1145,7 +1587,7 @@ data class ImageItem(
 private fun getStatusImages(status: WeiboTimelineStatus): List<ImageItem> {
     val pics = status.pics
     if (!pics.isNullOrEmpty()) {
-        return pics.map { pic ->
+        return pics.filter { it.type != "video" }.map { pic ->
             val largeUrl = pic.large?.url ?: pic.url ?: ""
             val thumbUrl = pic.bmiddle?.url ?: pic.url ?: largeUrl
             ImageItem(
@@ -1298,7 +1740,9 @@ fun WeiboImageGrid(
             modifier = Modifier
                 .wrapContentSize(Alignment.CenterStart)
                 .clip(RoundedCornerShape(cornerRadius))
-                .clickable { onImageClick(0, imageUrls) }
+                .combinedClickable(
+                    onClick = { onImageClick(0, imageUrls) }
+                )
         ) {
             AsyncImage(
                 model = image.thumbnailUrl.takeIf { it.isNotBlank() } ?: imageUrl,
@@ -1332,7 +1776,9 @@ fun WeiboImageGrid(
                                     .weight(1f)
                                     .aspectRatio(1f)
                                     .clip(RoundedCornerShape(cornerRadius))
-                                    .clickable { onImageClick(index, imageUrls) }
+                                    .combinedClickable(
+                                        onClick = { onImageClick(index, imageUrls) }
+                                    )
                             ) {
                                 AsyncImage(
                                     model = images[index].thumbnailUrl.takeIf { it.isNotBlank() } ?: images[index].largeUrl,
@@ -1371,13 +1817,15 @@ fun WeiboImageGrid(
                                     .weight(1f)
                                     .aspectRatio(1f)
                                     .clip(RoundedCornerShape(cornerRadius))
-                                    .clickable {
-                                        if (isLastVisible) {
-                                            onImageClick(maxVisible, imageUrls)
-                                        } else {
-                                            onImageClick(index, imageUrls)
-                                        }
-                                    }
+                                    .combinedClickable(
+                                        onClick = {
+                                            if (isLastVisible) {
+                                                onImageClick(maxVisible, imageUrls)
+                                            } else {
+                                                onImageClick(index, imageUrls)
+                                            }
+                                        },
+                                    )
                             ) {
                                 AsyncImage(
                                     model = images[index].thumbnailUrl.takeIf { it.isNotBlank() } ?: images[index].largeUrl,
@@ -1921,35 +2369,34 @@ fun DetailTabBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(BubbleBg)
-            .padding(top = 12.dp),
-        horizontalArrangement = Arrangement.SpaceAround
+            .padding(vertical = 10.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
     ) {
-        val tabs = listOf(
-            Triple(WeiboTimelineViewModel.DetailTab.REPOST, "转发", status.reposts_count ?: 0),
-            Triple(WeiboTimelineViewModel.DetailTab.COMMENT, "评论", status.comments_count ?: 0),
-            Triple(WeiboTimelineViewModel.DetailTab.LIKE, "赞", status.attitudes_count ?: 0)
+        data class TabDef(
+            val type: WeiboTimelineViewModel.DetailTab,
+            val icon: androidx.compose.ui.graphics.vector.ImageVector,
+            val count: Int
         )
 
-        tabs.forEach { (tabType, label, count) ->
-            val isSelected = activeTab == tabType
-            Column(
+        val tabs = listOf(
+            TabDef(WeiboTimelineViewModel.DetailTab.REPOST, Icons.Outlined.Share, status.reposts_count ?: 0),
+            TabDef(WeiboTimelineViewModel.DetailTab.COMMENT, Icons.Outlined.ChatBubbleOutline, status.comments_count ?: 0),
+            TabDef(WeiboTimelineViewModel.DetailTab.LIKE, Icons.Outlined.FavoriteBorder, status.attitudes_count ?: 0)
+        )
+
+        tabs.forEach { tab ->
+            val isSelected = activeTab == tab.type
+            Box(
                 modifier = Modifier
-                    .clickable { onTabSelected(tabType) }
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .clickable { onTabSelected(tab.type) }
+                    .padding(horizontal = 24.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "$label ${formatCount(count)}",
-                    color = if (isSelected) Color(0xFFF97316) else TextGrey,
-                    fontSize = 14.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Box(
-                    modifier = Modifier
-                        .height(2.dp)
-                        .width(28.dp)
-                        .background(if (isSelected) Color(0xFFF97316) else Color.Transparent)
+                Icon(
+                    imageVector = tab.icon,
+                    contentDescription = null,
+                    tint = if (isSelected) Color(0xFFF97316) else TextGrey,
+                    modifier = Modifier.size(22.dp)
                 )
             }
         }
@@ -2548,8 +2995,8 @@ fun ImagePreviewDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var showSaveDialogUrl by remember { mutableStateOf<String?>(null) }
-    
+    var imageActionMenuUrl by remember { mutableStateOf<String?>(null) }
+    var originalPage by remember { mutableStateOf(-1) }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -2573,8 +3020,9 @@ fun ImagePreviewDialog(
                     cookie = cookie,
                     onDismiss = onDismiss,
                     onLongPress = {
-                        showSaveDialogUrl = imageUrl
-                    }
+                        imageActionMenuUrl = imageUrl
+                    },
+                    useOriginalSize = (page == originalPage)
                 )
             }
 
@@ -2595,24 +3043,28 @@ fun ImagePreviewDialog(
                 }
             }
 
-            showSaveDialogUrl?.let { url ->
+            imageActionMenuUrl?.let { url ->
                 AlertDialog(
-                    onDismissRequest = { showSaveDialogUrl = null },
-                    title = { Text("保存图片") },
-                    text = { Text("确定要保存这张原图到相册吗？") },
+                    onDismissRequest = { imageActionMenuUrl = null },
+                    containerColor = Color(0xFF1E1E1E),
+                    titleContentColor = TextWhite,
+                    textContentColor = TextGrey,
+                    title = { Text("图片操作") },
+                    text = { Text("选择对这张图片的操作") },
                     confirmButton = {
-                        TextButton(
-                            onClick = {
-                                downloadImageToGallery(context, url, cookie)
-                                showSaveDialogUrl = null
-                            }
-                        ) {
-                            Text("确定", color = Color(0xFFF97316))
+                        TextButton(onClick = {
+                            originalPage = pagerState.currentPage
+                            imageActionMenuUrl = null
+                        }) {
+                            Text("查看原图", color = Color(0xFFF97316))
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showSaveDialogUrl = null }) {
-                            Text("取消", color = Color.Gray)
+                        TextButton(onClick = {
+                            downloadImageToGallery(context, url, cookie)
+                            imageActionMenuUrl = null
+                        }) {
+                            Text("保存原图", color = Color(0xFFF97316))
                         }
                     }
                 )
@@ -2626,24 +3078,26 @@ fun ZoomableImage(
     url: String,
     cookie: String = "",
     onDismiss: () -> Unit,
-    onLongPress: () -> Unit
+    onLongPress: () -> Unit,
+    useOriginalSize: Boolean = false
 ) {
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     val context = LocalContext.current
 
-    val imageModel = remember(url, cookie) {
-        if (cookie.isNotEmpty()) {
-            coil.request.ImageRequest.Builder(context)
-                .data(url)
-                .addHeader("Cookie", cookie)
-                .addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                .addHeader("Referer", "https://weibo.com/")
-                .crossfade(true)
-                .build()
-        } else {
-            url
-        }
+    val imageModel = remember(url, cookie, useOriginalSize) {
+        coil.request.ImageRequest.Builder(context)
+            .data(url)
+            .crossfade(true)
+            .apply {
+                if (cookie.isNotEmpty()) {
+                    addHeader("Cookie", cookie)
+                    addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    addHeader("Referer", "https://weibo.com/")
+                }
+                if (useOriginalSize) size(coil.size.Size.ORIGINAL)
+            }
+            .build()
     }
 
     Box(
@@ -2653,6 +3107,7 @@ fun ZoomableImage(
                 detectTapGestures(
                     onTap = { onDismiss() },
                     onDoubleTap = { pos ->
+                        if (useOriginalSize) return@detectTapGestures
                         if (scale > 1f) {
                             scale = 1f
                             offset = androidx.compose.ui.geometry.Offset.Zero
@@ -2666,6 +3121,36 @@ fun ZoomableImage(
                 )
             }
     ) {
+        if (useOriginalSize) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                SubcomposeAsyncImage(
+                    model = imageModel,
+                    contentDescription = "Zoomable Image",
+                    contentScale = ContentScale.FillWidth,
+                    loading = {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(300.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = Color(0xFFF97316))
+                        }
+                    },
+                    error = {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(300.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("图片加载失败", color = TextGrey, fontSize = 14.sp)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().wrapContentHeight()
+                )
+            }
+        } else {
         SubcomposeAsyncImage(
             model = imageModel,
             contentDescription = "Zoomable Image",
@@ -2714,6 +3199,7 @@ fun ZoomableImage(
                     }
                 }
         )
+        }
     }
 }
 
@@ -3545,6 +4031,18 @@ private fun WeiboMediaAndLinksSection(
                         }
                     )
                 } else {
+                    val isWeiboStatus = remember(targetUrl) { extractWeiboStatusIdFromUrl(targetUrl) != null }
+                    val displayIcon = when {
+                        isImage -> Icons.Default.Image
+                        isWeiboStatus -> Icons.Default.Description
+                        else -> Icons.Default.Link
+                    }
+                    val displayText = when {
+                        isImage -> "查看图片"
+                        isWeiboStatus -> "查看微博"
+                        else -> "查看链接"
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -3555,14 +4053,14 @@ private fun WeiboMediaAndLinksSection(
                             .padding(vertical = 4.dp, horizontal = 2.dp)
                     ) {
                         Icon(
-                            imageVector = if (isImage) Icons.Default.Image else Icons.Default.Link,
-                            contentDescription = if (isImage) "查看图片" else "查看链接",
+                            imageVector = displayIcon,
+                            contentDescription = displayText,
                             tint = Color(0xFF60A5FA),
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isImage) "查看图片" else "查看链接",
+                            text = displayText,
                             color = Color(0xFF60A5FA),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium
@@ -3599,16 +4097,29 @@ private fun WeiboMediaAndLinksSection(
         }
     } else {
         val pageInfo = remember(status) { getStatusPageInfo(status) }
-        if (pageInfo != null) {
-            Spacer(modifier = Modifier.height(10.dp))
-            val isVideo = pageInfo.type == "video" || pageInfo.media_info != null || pageInfo.object_type == "video"
-            if (isVideo) {
+        val isVideoPage = pageInfo?.type == "video" || pageInfo?.media_info != null || pageInfo?.object_type == "video"
+
+        if (isVideoPage) {
+            val videoPics = remember(status) {
+                status.pics?.filter { it.type == "video" && !it.videoSrc.isNullOrBlank() }.orEmpty()
+            }
+            if (videoPics.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                WeiboVideoGrid(
+                    videos = videoPics,
+                    onVideoClick = onVideoClick
+                )
+            } else if (pageInfo != null) {
+                Spacer(modifier = Modifier.height(10.dp))
                 WeiboVideoPreview(
                     pageInfo = pageInfo,
                     onVideoClick = onVideoClick,
                     onWebClick = onWebClick
                 )
-            } else {
+            }
+        } else {
+            if (pageInfo != null) {
+                Spacer(modifier = Modifier.height(10.dp))
                 WeiboPageInfoCard(
                     pageInfo = pageInfo,
                     onImageClick = onImageClick,
@@ -3616,14 +4127,14 @@ private fun WeiboMediaAndLinksSection(
                     onWebClick = onWebClick
                 )
             }
-        }
-        val cardImages = remember(status) { getStatusImages(status) }
-        if (cardImages.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(10.dp))
-            WeiboImageGrid(
-                images = cardImages,
-                onImageClick = onImageClick
-            )
+            val cardImages = remember(status) { getStatusImages(status) }
+            if (cardImages.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                WeiboImageGrid(
+                    images = cardImages,
+                    onImageClick = onImageClick
+                )
+            }
         }
     }
 }
@@ -4399,3 +4910,414 @@ private suspend fun PointerInputScope.detectLinkTaps(
         }
     })
 }
+
+@Composable
+fun RandomRoamingOverlay(
+    unviewedStatuses: List<WeiboTimelineStatus>,
+    readStatusIds: Set<String>,
+    onDismiss: () -> Unit,
+    onMarkAsRead: (String) -> Unit,
+    onMarkAllAsRead: () -> Unit,
+    onImageClick: (Int, List<String>) -> Unit,
+    onVideoClick: (String) -> Unit,
+    onWebClick: (String) -> Unit,
+    onOpenDetail: (WeiboTimelineStatus) -> Unit
+) {
+    var currentStatus by remember { mutableStateOf<WeiboTimelineStatus?>(null) }
+    var previousStatus by remember { mutableStateOf<WeiboTimelineStatus?>(null) }
+    var nextStatus by remember { mutableStateOf<WeiboTimelineStatus?>(null) }
+    val dragOffset = remember { Animatable(0f) }
+    val exitOffset = remember { Animatable(0f) }
+    val exitAlpha = remember { Animatable(1f) }
+    val enterOffset = remember { Animatable(0f) }
+    val swipeThresholdPx = with(LocalDensity.current) { 100f.dp.toPx() }
+    var isSwapping by remember { mutableStateOf(false) }
+    var exitingStatus by remember { mutableStateOf<WeiboTimelineStatus?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(unviewedStatuses, currentStatus) {
+        if (currentStatus == null && unviewedStatuses.isNotEmpty()) {
+            currentStatus = unviewedStatuses.random()
+        }
+    }
+
+    LaunchedEffect(currentStatus, unviewedStatuses) {
+        if (currentStatus != null && unviewedStatuses.isNotEmpty()) {
+            val pool = unviewedStatuses.filter { (it.idstr ?: it.id?.toString()) != (currentStatus?.idstr ?: currentStatus?.id?.toString()) }
+            nextStatus = pool.randomOrNull()
+        } else {
+            nextStatus = null
+        }
+    }
+
+    val configuration = LocalConfiguration.current
+    val screenHeightPx = with(LocalDensity.current) { configuration.screenHeightDp.dp.toPx().toInt() }
+
+    fun Modifier.swipeGestureModifier(): Modifier = this.pointerInput(Unit) {
+        detectVerticalDragGestures(
+            onDragStart = {},
+            onDragEnd = {
+                if (isSwapping) return@detectVerticalDragGestures
+                val offset = dragOffset.value
+                if (offset < -swipeThresholdPx) {
+                    isSwapping = true
+                    currentStatus?.let { s -> (s.idstr ?: s.id?.toString())?.let { onMarkAsRead(it) } }
+                } else if (offset > swipeThresholdPx) {
+                    isSwapping = true
+                } else {
+                    coroutineScope.launch { dragOffset.animateTo(0f, spring()) }
+                }
+            },
+            onVerticalDrag = { change, dragAmount ->
+                change.consume()
+                coroutineScope.launch { dragOffset.snapTo(dragOffset.value + dragAmount) }
+            }
+        )
+    }
+
+    // When swipe threshold is met, animate cards continuously from drag position
+    LaunchedEffect(isSwapping) {
+        if (!isSwapping) return@LaunchedEffect
+        val swipedUp = dragOffset.value < 0
+        val oldStatus = currentStatus
+        val newStatus = if (swipedUp) nextStatus else previousStatus
+        if (newStatus == null) {
+            // No card to swap to — spring back
+            dragOffset.animateTo(0f, spring())
+            isSwapping = false
+            return@LaunchedEffect
+        }
+        // Capture old card status before state change
+        exitingStatus = currentStatus
+        val exitTarget = if (swipedUp) -screenHeightPx.toFloat() else screenHeightPx.toFloat()
+        val enterStart = if (swipedUp) screenHeightPx.toFloat() else -screenHeightPx.toFloat()
+        // Prepare enter animation starting position
+        enterOffset.snapTo(enterStart)
+        // Animate old card off-screen from current drag position
+        launch { exitOffset.animateTo(exitTarget, tween(300, easing = FastOutSlowInEasing)) }
+        launch { exitAlpha.animateTo(0f, tween(300)) }
+        // Swap state — new card appears at enterStart (off-screen), old card captured in exitingCard
+        if (swipedUp) {
+            previousStatus = currentStatus
+            currentStatus = newStatus
+        } else {
+            currentStatus = newStatus
+            previousStatus = null
+        }
+        dragOffset.snapTo(0f)
+        // Animate new card onto screen
+        enterOffset.animateTo(0f, tween(300, easing = FastOutSlowInEasing))
+        // Cleanup
+        exitingStatus = null
+        exitOffset.snapTo(0f)
+        exitAlpha.snapTo(1f)
+        isSwapping = false
+    }
+
+    @Composable
+    fun RoamingCardContent(
+        status: WeiboTimelineStatus,
+        onImageClick: (Int, List<String>) -> Unit,
+        onVideoClick: (String) -> Unit,
+        onWebClick: (String) -> Unit,
+        onOpenDetail: (WeiboTimelineStatus) -> Unit
+    ) {
+        val uriHandler = LocalUriHandler.current
+        val contentStatus = status
+        val user = status.user
+        val screenName = user?.screen_name ?: "新浪用户"
+        val avatarUrl = user?.profile_image_url
+        val createdAt = status.created_at ?: ""
+        val sourceClean = status.source?.replace(Regex("<[^>]*>"), "") ?: ""
+        val detailUrl = statusDetailUrl(contentStatus)
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.size(42.dp)) {
+                    AsyncImage(
+                        model = avatarUrl ?: "https://tvax1.sinaimg.cn/crop.0.0.100.100.180/default_avatar.jpg",
+                        contentDescription = screenName,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .border(1.dp, Color(0x33FFFFFF), CircleShape),
+                        contentScale = ContentScale.Crop
+                    )
+                    if (screenName.contains("科技") || screenName.contains("人民网") || screenName.contains("爱范儿") || screenName.contains("公园")) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .background(Color(0xFFF97316), CircleShape)
+                                .border(1.dp, BubbleBg, CircleShape)
+                                .align(Alignment.BottomEnd),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "V",
+                                color = Color.White,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = screenName,
+                        color = if (screenName.contains("科技") || screenName.contains("人民网") || screenName.contains("爱范儿") || screenName.contains("公园")) Color(0xFFF97316) else TextWhite,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = formatWeiboCreatedAt(createdAt),
+                            color = TextGrey,
+                            fontSize = 11.sp,
+                            maxLines = 1
+                        )
+                        if (sourceClean.isNotBlank()) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = sourceClean,
+                                color = TextGrey,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            val locationName = remember(contentStatus) { getStatusLocation(contentStatus) }
+            WeiboRichText(
+                html = contentStatus.text ?: contentStatus.text_raw ?: contentStatus.raw_text ?: "",
+                fontSize = 15,
+                lineHeight = 22,
+                detailUrl = detailUrl,
+                urlStruct = contentStatus.url_struct,
+                locationName = locationName,
+                isMarkdown = contentStatus.md_render_mark == 1 || contentStatus.md_render_mark == 2 || contentStatus.style_config?.md_render_mark == 1 || contentStatus.style_config?.md_render_mark == 2,
+                onImageClick = onImageClick,
+                onWebClick = onWebClick,
+                onDetailClick = { onOpenDetail(contentStatus) },
+                statusPageInfo = contentStatus.page_info
+            )
+
+            val isRetweet = contentStatus.retweeted_status != null
+            WeiboMediaAndLinksSection(
+                status = contentStatus,
+                isRetweet = isRetweet,
+                onImageClick = onImageClick,
+                onVideoClick = onVideoClick,
+                onWebClick = onWebClick
+            )
+
+            contentStatus.retweeted_status?.let { retweet ->
+                Spacer(modifier = Modifier.height(10.dp))
+                RetweetedBlock(
+                    retweet = retweet,
+                    onImageClick = onImageClick,
+                    onVideoClick = onVideoClick,
+                    onWebClick = onWebClick,
+                    onOpenDetail = onOpenDetail
+                )
+            }
+
+            val location = remember(contentStatus) { getStatusLocation(contentStatus) }
+            if (!location.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Place,
+                        contentDescription = "定位",
+                        tint = Color(0xFF60A5FA),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = location,
+                        color = Color(0xFF60A5FA),
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    fun RoamingCard(
+        status: WeiboTimelineStatus,
+        modifier: Modifier = Modifier,
+        isInteractive: Boolean = true
+    ) {
+        Card(
+            modifier = modifier,
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E)),
+            border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 24.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(38.dp)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(9.6.dp)
+                                .background(Color(0xFFFF5F56), CircleShape)
+                                .clickable(enabled = isInteractive) { onDismiss() }
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(9.6.dp)
+                                .background(Color(0xFFFFBD2E), CircleShape)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(9.6.dp)
+                                .background(Color(0xFF27C93F), CircleShape)
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = Color(0x20FFFFFF), thickness = 1.dp)
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clipToBounds()
+                ) {
+                    RoamingCardContent(
+                        status = status,
+                        onImageClick = onImageClick,
+                        onVideoClick = onVideoClick,
+                        onWebClick = onWebClick,
+                        onOpenDetail = onOpenDetail
+                    )
+                }
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        // Full-screen dark overlay to focus attention on the card
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xE6000000))
+                .clickable(enabled = true, onClick = { onDismiss() })
+                .swipeGestureModifier()
+        )
+
+        BackHandler {
+            onDismiss()
+        }
+
+        if (unviewedStatuses.isEmpty() && currentStatus == null) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(24.dp)
+                    .clickable(enabled = true, onClick = {}) // block clicking inside from closing
+                    .background(Color(0xFF1E1E1E), RoundedCornerShape(16.dp))
+                    .border(1.dp, Color(0x20FFFFFF), RoundedCornerShape(16.dp))
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "🎉 所有未看微博已随机漫游完毕！",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF97316)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("返回信息流", color = Color.White)
+                }
+            }
+        } else {
+            // Exiting card (old card continuing off-screen)
+            exitingStatus?.let { exitStatus ->
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    RoamingCard(
+                        status = exitStatus,
+                        isInteractive = false,
+                        modifier = Modifier
+                            .fillMaxWidth(0.88f)
+                            .fillMaxHeight(0.62f)
+                            .graphicsLayer {
+                                translationY = exitOffset.value
+                                alpha = exitAlpha.value
+                            }
+                    )
+                }
+            }
+            // Current card (or entering card)
+            currentStatus?.let { status ->
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    RoamingCard(
+                        status = status,
+                        isInteractive = true,
+                        modifier = Modifier
+                            .fillMaxWidth(0.88f)
+                            .fillMaxHeight(0.62f)
+                            .clickable { onOpenDetail(status) }
+                            .graphicsLayer {
+                                translationY = if (isSwapping) enterOffset.value else dragOffset.value
+                                if (!isSwapping) {
+                                    val progress = (abs(dragOffset.value) / swipeThresholdPx).coerceIn(0f, 1f)
+                                    alpha = 1f - progress * 0.3f
+                                    scaleX = 1f - progress * 0.05f
+                                    scaleY = 1f - progress * 0.05f
+                                }
+                            }
+                            .swipeGestureModifier()
+                    )
+                }
+            }
+        }
+    }
+}
+

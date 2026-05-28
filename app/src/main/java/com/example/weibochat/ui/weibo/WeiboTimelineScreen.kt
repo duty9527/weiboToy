@@ -344,11 +344,6 @@ fun WeiboTimelineScreen(
                 onDismiss = { activeWebUrl = null }
             )
         }
-
-        WeiboMobileCookieSync(
-            repository = repository,
-            onCookiesReady = { viewModel.refresh() }
-        )
     }
 }
 
@@ -436,17 +431,12 @@ fun WeiboCard(
     val createdAt = status.created_at ?: ""
     val sourceClean = status.source?.replace(Regex("<[^>]*>"), "") ?: ""
     val detailUrl = statusDetailUrl(contentStatus)
-    val endingTopicUrl = remember(contentStatus) { getEndingTopicUrl(contentStatus) }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { 
-                if (endingTopicUrl != null) {
-                    onWebClick(endingTopicUrl)
-                } else {
-                    onOpenDetail(contentStatus)
-                }
+                onOpenDetail(contentStatus)
             },
         colors = CardDefaults.cardColors(containerColor = BubbleBg),
         shape = RoundedCornerShape(0.dp) // Mobile Weibo cards usually span full width without round corners on sides
@@ -590,7 +580,7 @@ fun WeiboCard(
             }
 
             Spacer(modifier = Modifier.height(14.dp))
-            Divider(color = DividerGrey, thickness = 0.5.dp)
+            HorizontalDivider(color = DividerGrey, thickness = 0.5.dp)
             Spacer(modifier = Modifier.height(8.dp))
 
             // Action Row: Repost, Comment, Like
@@ -656,7 +646,6 @@ fun RetweetedBlock(
     val uriHandler = LocalUriHandler.current
     val screenName = retweet.user?.screen_name ?: "原作者"
     val detailUrl = statusDetailUrl(retweet)
-    val endingTopicUrl = remember(retweet) { getEndingTopicUrl(retweet) }
     
     Box(
         modifier = Modifier
@@ -664,11 +653,7 @@ fun RetweetedBlock(
             .background(Color(0x0FFFFFFF), RoundedCornerShape(8.dp))
             .border(0.5.dp, Color(0x15FFFFFF), RoundedCornerShape(8.dp))
             .clickable { 
-                if (endingTopicUrl != null) {
-                    onWebClick(endingTopicUrl)
-                } else {
-                    onOpenDetail(retweet)
-                }
+                onOpenDetail(retweet)
             }
             .padding(10.dp)
     ) {
@@ -1233,6 +1218,7 @@ private fun getStatusLocation(status: WeiboTimelineStatus): String? {
     val pageInfo = status.page_info
     if (pageInfo != null && pageInfo.type == "place") {
         val title = pageInfo.title?.takeIf { it.isNotBlank() }
+            ?: pageInfo.page_title?.takeIf { it.isNotBlank() }
             ?: pageInfo.content1?.takeIf { it.isNotBlank() }
             ?: pageInfo.content2?.takeIf { it.isNotBlank() }
         if (!title.isNullOrBlank()) {
@@ -1255,7 +1241,9 @@ private fun getStatusLocation(status: WeiboTimelineStatus): String? {
                         urlObj.page_id?.startsWith("230413") == true ||
                         urlObj.page_info?.type == "place"
             if (isLoc) {
-                val title = urlObj.page_info?.title?.takeIf { it.isNotBlank() } ?: urlObj.url_title
+                val title = urlObj.page_info?.title?.takeIf { it.isNotBlank() }
+                    ?: urlObj.page_info?.page_title?.takeIf { it.isNotBlank() }
+                    ?: urlObj.url_title
                 if (!title.isNullOrBlank()) {
                     return title
                 }
@@ -2327,7 +2315,7 @@ fun CommentItem(
             }
  
             Spacer(modifier = Modifier.height(8.dp))
-            Divider(color = DividerGrey, thickness = 0.5.dp)
+            HorizontalDivider(color = DividerGrey, thickness = 0.5.dp)
         }
     }
 }
@@ -2378,7 +2366,7 @@ fun RepostItem(
                 onDetailClick = {}
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Divider(color = DividerGrey, thickness = 0.5.dp)
+            HorizontalDivider(color = DividerGrey, thickness = 0.5.dp)
         }
     }
 }
@@ -2954,12 +2942,12 @@ internal fun parseWeiboHtmlText(
                     processedHtml = processedHtml.replace(plainRegex, "")
                 } else {
                     val isLoc = urlObj.url_type_pic?.contains("location") == true || 
-                                urlObj.short_url?.contains("location") == true || 
+                                urlObj.short_url.contains("location") == true || 
                                 urlObj.long_url?.contains("location") == true ||
                                 urlObj.long_url?.contains("230413") == true ||
-                                urlObj.short_url?.contains("230413") == true ||
+                                urlObj.short_url.contains("230413") == true ||
                                 urlObj.long_url?.contains("100101") == true ||
-                                urlObj.short_url?.contains("100101") == true ||
+                                urlObj.short_url.contains("100101") == true ||
                                 urlObj.page_id?.startsWith("100101") == true ||
                                 urlObj.page_id?.startsWith("230413") == true ||
                                 urlObj.page_info?.type == "place"

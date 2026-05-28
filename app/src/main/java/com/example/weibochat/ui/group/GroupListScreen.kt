@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import com.example.weibochat.data.DataRepository
 import com.example.weibochat.data.WeiboContact
@@ -34,7 +35,20 @@ import com.example.weibochat.ui.weibo.WeiboTimelineScreen
 import com.example.weibochat.ui.weibo.WeiboTimelineViewModel
 import com.example.weibochat.ui.weibo.WeiboWebScreen
 import com.example.weibochat.ui.weibo.WEIBO_SEARCH_URL
+import com.example.weibochat.ui.weibo.WeiboMobileCookieSync
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.filled.Close
+import com.example.weibochat.ui.weibo.seedWeiboWebViewCookies
+import com.example.weibochat.ui.weibo.collectWeiboWebViewCookies
+import com.example.weibochat.ui.weibo.hasWeiboAuthCookie
+import com.example.weibochat.ui.weibo.isWeiboLoginUrl
+import com.example.weibochat.ui.weibo.mergeCookieStrings
+import com.example.weibochat.ui.weibo.isAllowedWeiboHost
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebSettings
+import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,14 +67,18 @@ fun GroupListScreen(
     
     var selectedTab by remember { mutableStateOf(0) }
     var showWeiboSearch by remember { mutableStateOf(false) }
+    var showVerificationWebView by remember { mutableStateOf(false) }
 
     fun loadGroups() {
+        android.util.Log.d("GroupListScreen", "loadGroups() called")
         coroutineScope.launch {
             isLoading = groups.isEmpty()
             errorMessage = null
             try {
                 val list = repository.fetchContacts()
+                android.util.Log.d("GroupListScreen", "loadGroups(): fetched ${list.size} contacts")
                 val filtered = list.filter { it.user?.type == 2 }
+                android.util.Log.d("GroupListScreen", "loadGroups(): filtered ${filtered.size} group contacts")
                 if (filtered.isNotEmpty()) {
                     groups = filtered
                 } else if (groups.isEmpty()) {
@@ -69,6 +87,7 @@ fun GroupListScreen(
                     android.widget.Toast.makeText(context, "同步群聊列表为空，展示缓存数据", android.widget.Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                android.util.Log.e("GroupListScreen", "loadGroups() failed", e)
                 if (groups.isEmpty()) {
                     errorMessage = "加载失败: ${e.localizedMessage}"
                 } else {
@@ -227,20 +246,38 @@ fun GroupListScreen(
                         fontSize = 15.sp,
                         modifier = Modifier.padding(bottom = 16.dp)
                     )
-                    Button(
-                        onClick = {
-                            if (isSessionExpired) {
-                                onLogout()
-                            } else {
-                                loadGroups()
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFC084FC)
-                        ),
-                        shape = RoundedCornerShape(12.dp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Text(if (isSessionExpired) "重新登录" else "重试", color = Color.White)
+                        Button(
+                            onClick = {
+                                if (isSessionExpired) {
+                                    onLogout()
+                                } else {
+                                    loadGroups()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFC084FC)
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(if (isSessionExpired) "重新登录" else "重试", color = Color.White)
+                        }
+
+                        if (!isSessionExpired) {
+                            Button(
+                                onClick = {
+                                    showVerificationWebView = true
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFF97316)
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("手动验证", color = Color.White)
+                            }
+                        }
                     }
                 }
             } else if (groups.isEmpty()) {
@@ -396,6 +433,124 @@ fun GroupListScreen(
                     repository = repository,
                     modifier = Modifier.fillMaxSize()
                 )
+            }
+
+            WeiboMobileCookieSync(
+                repository = repository,
+                onCookiesReady = {
+                    loadGroups()
+                    timelineViewModel.refresh()
+                }
+            )
+
+            if (showVerificationWebView) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xCC000000))
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Card(
+                        modifier = Modifier.fillMaxSize(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF10121B)
+                        ),
+                        border = CardDefaults.outlinedCardBorder(true).copy(
+                            brush = Brush.linearGradient(
+                                colors = listOf(
+                                    Color(0x33FFFFFF),
+                                    Color(0x05FFFFFF)
+                                )
+                            )
+                        )
+                    ) {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF1A1C24))
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "微博安全验证与同步",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                IconButton(onClick = { showVerificationWebView = false }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "关闭",
+                                        tint = Color.White
+                                    )
+                                }
+                            }
+
+                            Box(modifier = Modifier.weight(1f)) {
+                                var webViewInstance by remember { mutableStateOf<WebView?>(null) }
+                                
+                                DisposableEffect(Unit) {
+                                    onDispose {
+                                        webViewInstance?.apply {
+                                            stopLoading()
+                                            webViewClient = WebViewClient()
+                                            removeAllViews()
+                                            destroy()
+                                        }
+                                        webViewInstance = null
+                                    }
+                                }
+
+                                val webViewUserAgent = "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+
+                                AndroidView(
+                                    modifier = Modifier.fillMaxSize(),
+                                    factory = { ctx ->
+                                        seedWeiboWebViewCookies(repository.getAllCookies())
+                                        WebView(ctx).apply {
+                                            webViewInstance = this
+                                            settings.javaScriptEnabled = true
+                                            settings.domStorageEnabled = true
+                                            settings.cacheMode = WebSettings.LOAD_DEFAULT
+                                            settings.userAgentString = webViewUserAgent
+                                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                            webViewClient = object : WebViewClient() {
+                                                override fun onPageFinished(view: WebView?, url: String?) {
+                                                    CookieManager.getInstance().flush()
+                                                    val webViewCookie = collectWeiboWebViewCookies()
+                                                    val hasAuth = hasWeiboAuthCookie(webViewCookie)
+                                                    val isLogin = isWeiboLoginUrl(url)
+
+                                                    if (webViewCookie.isNotBlank() && hasAuth && !isLogin) {
+                                                        val merged = mergeCookieStrings(repository.getAllCookies(), webViewCookie)
+                                                        repository.saveMobileCookie(merged)
+                                                        android.widget.Toast.makeText(context, "验证并同步Cookie成功！", android.widget.Toast.LENGTH_SHORT).show()
+                                                        showVerificationWebView = false
+                                                        loadGroups()
+                                                        timelineViewModel.refresh()
+                                                    }
+                                                }
+
+                                                override fun shouldOverrideUrlLoading(
+                                                    view: WebView?,
+                                                    request: WebResourceRequest?
+                                                ): Boolean {
+                                                    val host = request?.url?.host ?: return false
+                                                    return !isAllowedWeiboHost(host)
+                                                }
+                                            }
+                                            loadUrl("https://m.weibo.cn/")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }

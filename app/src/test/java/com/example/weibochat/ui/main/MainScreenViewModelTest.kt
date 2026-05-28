@@ -34,6 +34,8 @@ private class FakeMyModelRepository : DataRepository {
   override suspend fun getUserContextMessages(senderName: String, timestamp: String): List<Message> = emptyList()
   override fun saveCredentials(cookie: String, groupId: String) {}
   override fun getCredentials(): Pair<String, String> = Pair("", "")
+  override fun saveMobileCookie(cookie: String) {}
+  override fun getMobileCookie(): String = ""
   override fun getAllCookies(): String = ""
   override suspend fun fetchOlderMessages(maxMid: Long): Boolean = false
   override suspend fun fetchContacts(): List<WeiboContact> = emptyList()

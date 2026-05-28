@@ -8,6 +8,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import android.content.Context
 
 class WeiboRiskControlException(message: String) : java.io.IOException(message)
@@ -197,6 +198,7 @@ data class WeiboTimelineMediaInfo(
 data class WeiboTimelinePageInfo(
     val type: String?,
     val title: String?,
+    val page_title: String?,
     val content1: String?,
     val content2: String?,
     val page_url: String?,
@@ -386,7 +388,7 @@ private data class WeiboStatusExtendData(
 class WeiboCommentListTypeAdapterFactory : com.google.gson.TypeAdapterFactory {
     override fun <T : Any?> create(gson: com.google.gson.Gson, typeToken: com.google.gson.reflect.TypeToken<T>): com.google.gson.TypeAdapter<T>? {
         val rawType = typeToken.rawType
-        if (java.util.List::class.java.isAssignableFrom(rawType)) {
+        if (List::class.java.isAssignableFrom(rawType)) {
             val type = typeToken.type
             if (type is java.lang.reflect.ParameterizedType) {
                 val args = type.actualTypeArguments
@@ -454,6 +456,16 @@ class WeiboApiClient(private val context: Context) {
     private val cookieJar = SharedPreferencesCookieJar(context)
     private val client = OkHttpClient.Builder()
         .cookieJar(cookieJar)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(15, TimeUnit.SECONDS)
+        .build()
+    private val ssoClient = client.newBuilder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(8, TimeUnit.SECONDS)
         .build()
     private val noRedirectClient = client.newBuilder()
         .followRedirects(false)
@@ -559,7 +571,7 @@ class WeiboApiClient(private val context: Context) {
             .addHeader("Referer", "https://weibo.com/")
             .build()
         try {
-            client.newCall(request).execute().use { response ->
+            ssoClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
                 
                 val body = response.body?.string() ?: return@withContext null
@@ -575,17 +587,15 @@ class WeiboApiClient(private val context: Context) {
                             .addHeader("Referer", "https://weibo.com/")
                             .build()
                         try {
-                            client.newCall(cRequest).execute().use { cResponse ->
+                            ssoClient.newCall(cRequest).execute().use { cResponse ->
                                 // CookieJar handles it
                             }
                         } catch (e: Exception) {
-                            e.printStackTrace()
+                            android.util.Log.w("WeiboApiClient", "SSO cross-domain cookie request failed: $cUrl", e)
                         }
                     }
                 }
 
-                hydrateTimelineMobileSession()
-                
                 val flatCookie = cookieJar.getFlatCookieString()
                 val finalCookie = if (loginResponse.uid != null) {
                     "uid=${loginResponse.uid}; $flatCookie"
@@ -1176,25 +1186,23 @@ class WeiboApiClient(private val context: Context) {
             .build()
 
         try {
-            noRedirectClient.newCall(request).execute().use { response ->
-                response.body?.close()
-                val code = response.code
-                if (code == 302 || code == 307 || code == 308) {
-                    val location = response.header("Location").orEmpty()
-                    if (location.contains("passport") || location.contains("login") || location.contains("signin")) {
-                        android.util.Log.w("WeiboApiClient", "Timeline mobile page session request redirected to login page: $location")
-                        return false
-                    }
-                } else if (!response.isSuccessful) {
-                    android.util.Log.w("WeiboApiClient", "Timeline mobile page session request failed: code=$code, url=$pageUrl")
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string() // Consume body
+                val finalUrl = response.request.url.toString()
+                if (finalUrl.contains("passport") || finalUrl.contains("login") || finalUrl.contains("signin")) {
+                    android.util.Log.w("WeiboApiClient", "Timeline mobile page session redirected to login page: $finalUrl")
                     return false
                 }
+                if (!response.isSuccessful) {
+                    android.util.Log.w("WeiboApiClient", "Timeline mobile page session failed: code=${response.code}, url=$finalUrl")
+                    return false
+                }
+                return true
             }
         } catch (e: Exception) {
             android.util.Log.w("WeiboApiClient", "Timeline mobile page session request failed", e)
             return false
         }
-        return true
     }
 
     suspend fun fetchWeiboComments(
@@ -1665,35 +1673,24 @@ class SharedPreferencesCookieJar(private val context: Context) : okhttp3.CookieJ
         if (authCookies.isEmpty()) return
 
         val expiresAt = System.currentTimeMillis() + 30L * 24 * 3600 * 1000
-        val weiboComCookies = authCookies.map { cookie ->
-            okhttp3.Cookie.Builder()
-                .name(cookie.name)
-                .value(cookie.value)
-                .path("/")
-                .expiresAt(if (cookie.expiresAt > System.currentTimeMillis()) cookie.expiresAt else expiresAt)
-                .domain("weibo.com")
-                .apply {
-                    if (cookie.secure) secure()
-                    if (cookie.httpOnly) httpOnly()
-                }
-                .build()
-        }
-        val weiboCnCookies = authCookies.map { cookie ->
-            okhttp3.Cookie.Builder()
-                .name(cookie.name)
-                .value(cookie.value)
-                .path("/")
-                .expiresAt(if (cookie.expiresAt > System.currentTimeMillis()) cookie.expiresAt else expiresAt)
-                .domain("weibo.cn")
-                .apply {
-                    if (cookie.secure) secure()
-                    if (cookie.httpOnly) httpOnly()
-                }
-                .build()
-        }
+        val targetHosts = listOf("weibo.com", "weibo.cn", "login.sina.com.cn", "passport.weibo.com")
 
-        mergeCookies("weibo.com", weiboComCookies)
-        mergeCookies("weibo.cn", weiboCnCookies)
+        targetHosts.forEach { host ->
+            val hostCookies = authCookies.map { cookie ->
+                okhttp3.Cookie.Builder()
+                    .name(cookie.name)
+                    .value(cookie.value)
+                    .path("/")
+                    .expiresAt(if (cookie.expiresAt > System.currentTimeMillis()) cookie.expiresAt else expiresAt)
+                    .domain(host)
+                    .apply {
+                        if (cookie.secure) secure()
+                        if (cookie.httpOnly) httpOnly()
+                    }
+                    .build()
+            }
+            mergeCookies(host, hostCookies)
+        }
     }
 
     private fun mergeCookies(host: String, cookies: List<okhttp3.Cookie>) {
@@ -1709,7 +1706,7 @@ class SharedPreferencesCookieJar(private val context: Context) : okhttp3.CookieJ
         cookieStore.clear()
         sharedPrefs.edit().remove("cookies_json").apply()
         val mainPrefs = context.getSharedPreferences("weibo_prefs", Context.MODE_PRIVATE)
-        mainPrefs.edit().remove("cookie").remove("group_id").apply()
+        mainPrefs.edit().remove("cookie").remove("mobile_cookie").remove("group_id").apply()
     }
 
     @Synchronized

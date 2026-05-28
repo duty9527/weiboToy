@@ -68,7 +68,9 @@ internal fun hasWeiboAuthCookie(cookieString: String): Boolean {
 }
 
 internal fun isWeiboLoginUrl(url: String?): Boolean {
-    val host = Uri.parse(url ?: return false).host ?: return false
+    if (url.isNullOrBlank()) return false
+    if (url.contains("retcode=")) return true
+    val host = Uri.parse(url).host ?: return false
     return host == "login.sina.com.cn" ||
         host.endsWith(".passport.weibo.com") ||
         host.endsWith(".passport.weibo.cn") ||
@@ -84,6 +86,8 @@ internal fun isAllowedWeiboHost(host: String): Boolean {
         normalized.endsWith(".weibo.cn") ||
         normalized == "sina.com.cn" ||
         normalized.endsWith(".sina.com.cn") ||
+        normalized == "sina.cn" ||
+        normalized.endsWith(".sina.cn") ||
         normalized == "sinaimg.cn" ||
         normalized.endsWith(".sinaimg.cn")
 }
@@ -95,5 +99,8 @@ private val weiboCookieHosts = listOf(
     "https://weibo.cn",
     "https://login.sina.com.cn",
     "https://passport.weibo.com",
-    "https://passport.weibo.cn"
+    "https://passport.weibo.cn",
+    "https://sina.cn",
+    "https://login.sina.cn",
+    "https://passport.sina.cn"
 )

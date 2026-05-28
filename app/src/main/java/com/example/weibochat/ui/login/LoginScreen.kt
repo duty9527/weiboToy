@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.platform.LocalContext
 import com.example.weibochat.data.DataRepository
 import com.example.weibochat.data.WeiboApiClient
@@ -68,26 +69,27 @@ fun LoginScreen(
                 if (statusResponse != null) {
                     when (statusResponse.retcode) {
                         20000000 -> {
-                            statusText = "登录成功，同步Cookie中..."
+                            statusText = "登录成功，同步桌面端Cookie中..."
+                            pollingJobActive = false
                             val alt = statusResponse.data?.alt
                             if (alt != null) {
-                                val mergedCookie = apiClient.performSsoLogin(alt)
-                                if (mergedCookie != null) {
-                                    repository.saveCredentials(mergedCookie, "")
-                                    onLoginSuccess()
-                                    break
-                                } else {
-                                    statusText = "跨域登录失败，请重试"
-                                    pollingJobActive = false
-                                    isError = true
-                                    break
+                                coroutineScope.launch {
+                                    val mergedCookie = withTimeoutOrNull(15_000L) {
+                                        apiClient.performSsoLogin(alt)
+                                    }
+                                    if (mergedCookie != null) {
+                                        repository.saveCredentials(mergedCookie, "")
+                                        onLoginSuccess()
+                                    } else {
+                                        statusText = "桌面端Cookie同步失败或超时，请重试"
+                                        isError = true
+                                    }
                                 }
                             } else {
                                 statusText = "参数缺失，请重试"
-                                pollingJobActive = false
                                 isError = true
-                                break
                             }
+                            break
                         }
                         50114002 -> {
                             statusText = "已扫码，请在手机端确认授权"

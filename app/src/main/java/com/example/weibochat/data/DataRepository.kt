@@ -29,6 +29,8 @@ interface DataRepository {
     suspend fun getUserContextMessages(senderName: String, timestamp: String): List<Message>
     fun saveCredentials(cookie: String, groupId: String)
     fun getCredentials(): Pair<String, String>
+    fun saveMobileCookie(cookie: String)
+    fun getMobileCookie(): String
     fun getAllCookies(): String
     suspend fun fetchOlderMessages(maxMid: Long): Boolean
     suspend fun fetchContacts(): List<WeiboContact>
@@ -57,6 +59,8 @@ interface DataRepository {
     suspend fun fetchWeiboAttitudes(statusId: String, page: Int): WeiboAttitudesResponse?
     suspend fun likeWeiboStatus(statusId: String): Boolean
     suspend fun unlikeWeiboStatus(statusId: String): Boolean
+    fun markWeiboStatusAsRead(statusId: String)
+    fun getReadWeiboStatusIds(): Set<String>
 }
 
 class DefaultDataRepository(context: Context) : DataRepository {
@@ -72,6 +76,25 @@ class DefaultDataRepository(context: Context) : DataRepository {
     init {
         _databaseUpdates.tryEmit(Unit)
         startPeriodicSync()
+    }
+
+    private fun mergeCookieStrings(firstCookieString: String, secondCookieString: String): String {
+        val cookies = linkedMapOf<String, String>()
+        listOf(firstCookieString, secondCookieString).forEach { cookieString ->
+            cookieString
+                .split(";")
+                .map { it.trim() }
+                .filter { it.contains("=") }
+                .forEach { cookie ->
+                    val parts = cookie.split("=", limit = 2)
+                    cookies[parts[0].trim()] = parts[1].trim()
+                }
+        }
+        return cookies.map { "${it.key}=${it.value}" }.joinToString("; ")
+    }
+
+    private fun getMobileApiCookie(): String {
+        return getCredentials().first
     }
 
     override val allMessages: Flow<List<Message>> =
@@ -655,6 +678,17 @@ class DefaultDataRepository(context: Context) : DataRepository {
         return Pair(cookie, groupId)
     }
 
+    override fun saveMobileCookie(cookie: String) {
+        sharedPrefs.edit()
+            .putString("cookie", cookie)
+            .apply()
+        _databaseUpdates.tryEmit(Unit)
+    }
+
+    override fun getMobileCookie(): String {
+        return sharedPrefs.getString("cookie", "") ?: ""
+    }
+
     override fun getAllCookies(): String {
         return apiClient.getStoredCookieString(getCredentials().first)
     }
@@ -717,7 +751,7 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchContacts(): List<WeiboContact> {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank()) {
             val response = apiClient.queryContacts(cookie)
             if (response != null && !response.contacts.isNullOrEmpty()) {
@@ -731,15 +765,14 @@ class DefaultDataRepository(context: Context) : DataRepository {
         listId: String,
         maxId: Long?
     ): WeiboTimelineResponse? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchFriendsTimeline(
                 cookie = cookie,
                 listId = listId,
                 maxId = maxId,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -747,14 +780,13 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchWeiboStatusLongText(statusId: String): String? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchStatusLongText(
                 cookie = cookie,
                 statusId = statusId,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -762,14 +794,13 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchWeiboStatus(statusId: String): WeiboTimelineStatus? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchStatusShow(
                 cookie = cookie,
                 statusId = statusId,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -777,16 +808,15 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchWeiboComments(statusId: String, maxId: Long?, maxIdType: Int): WeiboCommentsResponse? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchWeiboComments(
                 cookie = cookie,
                 statusId = statusId,
                 maxId = maxId,
                 maxIdType = maxIdType,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -794,16 +824,15 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchWeiboCommentChildren(commentId: Long, maxId: Long, maxIdType: Int): WeiboCommentChildrenResponse? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && commentId > 0L) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchWeiboCommentChildren(
                 cookie = cookie,
                 commentId = commentId,
                 maxId = maxId,
                 maxIdType = maxIdType,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -811,15 +840,14 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchWeiboReposts(statusId: String, page: Int): WeiboRepostsResponse? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchWeiboReposts(
                 cookie = cookie,
                 statusId = statusId,
                 page = page,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -827,15 +855,14 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun fetchWeiboAttitudes(statusId: String, page: Int): WeiboAttitudesResponse? {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.fetchWeiboAttitudes(
                 cookie = cookie,
                 statusId = statusId,
                 page = page,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -843,14 +870,13 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun likeWeiboStatus(statusId: String): Boolean {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.likeStatus(
                 cookie = cookie,
                 statusId = statusId,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }
@@ -858,14 +884,13 @@ class DefaultDataRepository(context: Context) : DataRepository {
     }
 
     override suspend fun unlikeWeiboStatus(statusId: String): Boolean {
-        val cookie = getCredentials().first
+        val cookie = getMobileApiCookie()
         if (cookie.isNotBlank() && statusId.isNotBlank()) {
-            val activeGroupIdVal = getActiveGroupId() ?: getCredentials().second
             return apiClient.unlikeStatus(
                 cookie = cookie,
                 statusId = statusId,
                 onCookieUpdated = { newCookie ->
-                    saveCredentials(newCookie, activeGroupIdVal)
+                    saveMobileCookie(newCookie)
                 }
             )
         }

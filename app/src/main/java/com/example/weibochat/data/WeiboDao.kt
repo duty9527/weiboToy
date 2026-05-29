@@ -24,6 +24,9 @@ interface WeiboDao {
     @Query("SELECT * FROM weibos WHERE id = :id AND is_gap = 1")
     suspend fun getGapById(id: Long): WeiboEntity?
 
+    @Query("SELECT * FROM weibos WHERE is_gap = 1")
+    suspend fun getAllGaps(): List<WeiboEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrReplace(weibo: WeiboEntity)
 

@@ -78,8 +78,9 @@ fun GroupListScreen(
     val unviewedStatuses = remember(timelineUiState, readStatusIds) {
         val statuses = (timelineUiState as? TimelineUiState.Success)?.statuses.orEmpty()
         statuses.filter { status ->
+            val isGap = status.raw_text?.startsWith("__GAP__:") == true
             val id = status.idstr ?: status.id?.toString()
-            id == null || id !in readStatusIds
+            !isGap && (id == null || id !in readStatusIds)
         }
     }
     val unreadCount = unviewedStatuses.size
@@ -459,6 +460,7 @@ fun GroupListScreen(
                     repository = repository,
                     reloadSignal = 0,
                     initialUrl = WEIBO_SEARCH_URL,
+                    onBack = { showWeiboSearch = false },
                     modifier = Modifier.fillMaxSize()
                 )
             } else {

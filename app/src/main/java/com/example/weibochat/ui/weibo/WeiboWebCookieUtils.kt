@@ -15,7 +15,16 @@ internal fun seedWeiboWebViewCookies(cookieString: String) {
         .filter { it.contains("=") }
         .forEach { cookie ->
             weiboCookieHosts.forEach { host ->
-                cookieManager.setCookie(host, "$cookie; Path=/")
+                val uri = Uri.parse(host)
+                val hostStr = uri.host ?: ""
+                val domainAttr = when {
+                    hostStr.endsWith("weibo.com") -> "; Domain=.weibo.com"
+                    hostStr.endsWith("weibo.cn") -> "; Domain=.weibo.cn"
+                    hostStr.endsWith("sina.com.cn") -> "; Domain=.sina.com.cn"
+                    hostStr.endsWith("sina.cn") -> "; Domain=.sina.cn"
+                    else -> ""
+                }
+                cookieManager.setCookie(host, "$cookie$domainAttr; Path=/")
             }
         }
 

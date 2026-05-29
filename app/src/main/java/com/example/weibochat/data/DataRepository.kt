@@ -96,6 +96,16 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
     init {
         _databaseUpdates.tryEmit(Unit)
         startPeriodicSync()
+        repositoryScope.launch {
+            try {
+                val gaps = weiboDao.getAllGaps()
+                gaps.forEach { gap ->
+                    syncGap(gap.id)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     private fun mergeCookieStrings(firstCookieString: String, secondCookieString: String): String {
@@ -992,17 +1002,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         val gson = Gson()
         return mapNotNull { entity ->
             if (entity.isGap == 1) {
-                WeiboTimelineStatus(
-                    id = entity.id,
-                    idstr = entity.id.toString(),
-                    created_at = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US).format(Date(entity.createdAtLong)),
-                    raw_text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
-                    text_raw = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
-                    text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
-                    source = null, isLongText = false, user = null,
-                    pic_ids = null, pic_infos = null, retweeted_status = null,
-                    page_info = null, reposts_count = null, comments_count = null, attitudes_count = null
-                )
+                null
             } else {
                 try {
                     gson.fromJson(entity.contentJson, WeiboTimelineStatus::class.java)
@@ -1039,6 +1039,9 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
                         gapSinceId = localNewestId,
                         gapMaxId = oldestId - 1
                     ))
+                    repositoryScope.launch {
+                        syncGap(gapId)
+                    }
                 }
 
                 insertWeiboStatuses(statuses)

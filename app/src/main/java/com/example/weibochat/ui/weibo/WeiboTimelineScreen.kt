@@ -147,8 +147,9 @@ fun WeiboTimelineScreen(
     val unviewedStatuses = remember(uiState, readStatusIds) {
         val statuses = (uiState as? TimelineUiState.Success)?.statuses.orEmpty()
         statuses.filter { status ->
+            val isGap = status.raw_text?.startsWith("__GAP__:") == true
             val id = status.idstr ?: status.id?.toString()
-            id == null || id !in readStatusIds
+            !isGap && (id == null || id !in readStatusIds)
         }
     }
     val coroutineScope = rememberCoroutineScope()
@@ -4330,6 +4331,8 @@ fun WeiboWebDialog(
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
                         factory = { context ->
+                            val cookieManager = android.webkit.CookieManager.getInstance()
+                            cookieManager.setAcceptCookie(true)
                             seedWeiboWebViewCookies(repository.getAllCookies())
                             android.webkit.WebView(context).apply {
                                 webViewState.value = this
@@ -4337,17 +4340,31 @@ fun WeiboWebDialog(
                                 settings.domStorageEnabled = true
                                 settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
                                 settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+                                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                cookieManager.setAcceptThirdPartyCookies(this, true)
                                 webViewClient = object : android.webkit.WebViewClient() {
                                     override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                         isLoading = true
                                     }
 
                                     override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
-                                        android.webkit.CookieManager.getInstance().flush()
+                                        cookieManager.flush()
                                         isLoading = false
                                     }
                                 }
+                                tag = url
                                 loadUrl(url)
+                            }
+                        },
+                        update = { webView ->
+                            val cookieManager = android.webkit.CookieManager.getInstance()
+                            cookieManager.setAcceptCookie(true)
+                            seedWeiboWebViewCookies(repository.getAllCookies())
+                            cookieManager.setAcceptThirdPartyCookies(webView, true)
+                            webViewState.value = webView
+                            if (webView.tag != url) {
+                                webView.tag = url
+                                webView.loadUrl(url)
                             }
                         }
                     )

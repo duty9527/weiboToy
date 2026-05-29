@@ -2,6 +2,13 @@ package com.example.weibochat.data
 
 import android.content.Context
 import android.content.SharedPreferences
+
+
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.filter
+import androidx.paging.map
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,78 +22,38 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import com.example.weibochat.util.TimeUtils
 import com.google.gson.Gson
 import coil.request.ImageRequest
 import coil.request.CachePolicy
 
-interface DataRepository {
-    val allMessages: Flow<List<Message>>
-    suspend fun sendMessage(content: String, senderName: String = "我", contextId: Long? = 1): Long
-    suspend fun getMessagesByContextId(contextId: Long): List<Message>
-    suspend fun getUserContextMessages(senderName: String, timestamp: String): List<Message>
-    fun saveCredentials(cookie: String, groupId: String)
-    fun getCredentials(): Pair<String, String>
-    fun saveMobileCookie(cookie: String)
-    fun getMobileCookie(): String
-    fun getAllCookies(): String
-    suspend fun fetchOlderMessages(maxMid: Long): Boolean
-    suspend fun loadOlderLocalMessages(groupId: String, beforeTimestamp: String, limit: Int = 500): List<Message>
-    suspend fun fetchContacts(): List<WeiboContact>
-    fun setActiveGroupId(groupId: String?)
-    fun getActiveGroupId(): String?
-    fun saveBlockedKeywords(keywords: String)
-    fun getBlockedKeywordsString(): String
-    fun getBlockedKeywordsList(): List<String>
-    fun getBlockedKeywordRules(): List<BlockedKeywordRule>
-    fun saveBlockedKeywordRules(rules: List<BlockedKeywordRule>)
-    fun saveBlockedUsers(users: String)
-    fun getBlockedUsersString(): String
-    fun getBlockedUsersList(): List<String>
-    fun isMessageBlocked(sender: String, content: String): Boolean
-    fun saveReadPosition(groupId: String, index: Int, offset: Int)
-    fun getReadPosition(groupId: String): Pair<Int, Int>?
-    suspend fun getMessageContext(message: Message): List<Message>
-    suspend fun syncMessagesUntil(targetTimeMillis: Long): Int
-    suspend fun fetchFriendsTimeline(
-        listId: String = DEFAULT_WEIBO_TIMELINE_LIST_ID,
-        maxId: Long? = null,
-        sinceId: Long? = null
-    ): WeiboTimelineResponse?
-    suspend fun fetchWeiboStatusLongText(statusId: String): String?
-    suspend fun fetchWeiboStatus(statusId: String): WeiboTimelineStatus?
-    suspend fun fetchWeiboComments(statusId: String, maxId: Long?, maxIdType: Int): WeiboCommentsResponse?
-    suspend fun fetchWeiboCommentChildren(commentId: Long, maxId: Long, maxIdType: Int): WeiboCommentChildrenResponse?
-    suspend fun fetchWeiboReposts(statusId: String, page: Int): WeiboRepostsResponse?
-    suspend fun fetchWeiboAttitudes(statusId: String, page: Int): WeiboAttitudesResponse?
-    suspend fun likeWeiboStatus(statusId: String): Boolean
-    suspend fun unlikeWeiboStatus(statusId: String): Boolean
-    fun markWeiboStatusAsRead(statusId: String)
-    fun getReadWeiboStatusIds(): Set<String>
-    fun getLocalTimeline(): Flow<List<WeiboTimelineStatus>>
-    suspend fun syncNewTimeline(): Result<Unit>
-    suspend fun syncGap(gapId: Long): Result<Unit>
-    suspend fun loadMoreTimeline(): Result<Unit>
-    fun saveLastViewedWeibo(statusId: String, index: Int, offset: Int)
-    fun getLastViewedWeibo(): Triple<String, Int, Int>?
-}
+interface DataRepository : 
+    com.example.weibochat.data.repository.AuthRepository, 
+    com.example.weibochat.data.repository.MessageRepository, 
+    com.example.weibochat.data.repository.TimelineRepository, 
+    com.example.weibochat.data.repository.SettingRepository
 
-class DefaultDataRepository(private val context: Context) : DataRepository {
+class DefaultDataRepository(
+    private val context: Context,
+    private val database: WeiboDatabase,
+    private val messageDao: MessageDao,
+    private val weiboDao: WeiboDao,
+    private val apiClient: WeiboApiClient
+) : DataRepository {
     companion object {
         private const val MESSAGE_LOAD_LIMIT = 5000
+        private const val MESSAGE_PAGE_SIZE = 50
+        private const val TIMELINE_PAGE_SIZE = 20
     }
 
-    private val database = WeiboDatabase.create(context)
-    private val messageDao = database.messageDao()
-    private val weiboDao = database.weiboDao()
-    private val apiClient = WeiboApiClient(context)
     private val sharedPrefs: SharedPreferences = migrateToEncryptedPrefs(
         context, "weibo_prefs", "weibo_encrypted_prefs"
     )
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
 
     private val _databaseUpdates = MutableSharedFlow<Unit>(replay = 1)
     private val _weiboDatabaseUpdates = MutableSharedFlow<Unit>(replay = 1)
@@ -137,6 +104,29 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
                 flowOf(emptyList())
             }
         }.flowOn(Dispatchers.IO)
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    override fun getMessagesPagingData(): Flow<PagingData<Message>> {
+        return activeGroupIdFlow.flatMapLatest { groupId ->
+            if (groupId == null) {
+                flowOf(PagingData.empty())
+            } else {
+                Pager(
+                    config = PagingConfig(
+                        pageSize = MESSAGE_PAGE_SIZE,
+                        initialLoadSize = MESSAGE_PAGE_SIZE,
+                        prefetchDistance = 10,
+                        enablePlaceholders = false
+                    ),
+                    pagingSourceFactory = { messageDao.getMessagesPagingSource(groupId) }
+                ).flow.map { pagingData ->
+                    pagingData
+                        .map { it.toMessage() }
+                        .filter { !isMessageBlocked(it.senderName, it.content) }
+                }
+            }
+        }.flowOn(Dispatchers.IO)
+    }
 
     private suspend fun findParentMessageId(
         groupId: String,
@@ -218,8 +208,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
     }
 
     private suspend fun buildMessageEntity(wm: WeiboMessage, groupId: String): MessageEntity {
-        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-        val timeStr = sdf.format(Date(wm.time * 1000))
+        val timeStr = TimeUtils.formatDefault(wm.time * 1000)
 
         var imageUrl: String? = null
         if (wm.media_type == 1 && !wm.fids.isNullOrEmpty()) {
@@ -397,12 +386,11 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             if (response != null && response.result) {
                 val mid = response.id ?: response.mid ?: System.currentTimeMillis()
                 val responseTime = response.time ?: response.ts ?: (System.currentTimeMillis() / 1000)
-                val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                 val parentId = findParentMessageId(targetGroupId, content, mid)
 
                 val entity = MessageEntity(
                     id = mid,
-                    timestamp = sdf.format(Date(responseTime * 1000)),
+                    timestamp = TimeUtils.formatDefault(responseTime * 1000),
                     senderName = response.from_user?.screen_name ?: "我",
                     groupSuffix = "群聊",
                     content = content,
@@ -418,13 +406,12 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
         // Fallback: Local insert for offline/simulation mode
         val mid = System.currentTimeMillis()
-        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         val fallbackGroupId = targetGroupId.ifBlank { "4761715839862414" }
         val parentId = findParentMessageId(fallbackGroupId, content, mid)
 
         val entity = MessageEntity(
             id = mid,
-            timestamp = sdf.format(Date()),
+            timestamp = TimeUtils.formatDefault(System.currentTimeMillis()),
             senderName = senderName,
             groupSuffix = "群聊",
             content = content,
@@ -508,14 +495,10 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
     }
 
     override suspend fun getUserContextMessages(senderName: String, timestamp: String): List<Message> = withContext(Dispatchers.IO) {
-        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         try {
-            val date = sdf.parse(timestamp) ?: Date()
-            val cal = Calendar.getInstance().apply { time = date }
-            cal.add(Calendar.HOUR_OF_DAY, -1)
-            val startTime = sdf.format(cal.time)
-            cal.add(Calendar.HOUR_OF_DAY, 2)
-            val endTime = sdf.format(cal.time)
+            val epochMilli = TimeUtils.parseDefault(timestamp)
+            val startTime = TimeUtils.formatDefault(epochMilli - 60L * 60 * 1000)
+            val endTime = TimeUtils.formatDefault(epochMilli + 60L * 60 * 1000)
 
             val targetGroupId = activeGroupIdFlow.value ?: getCredentials().second
             val entities = messageDao.getUserContextMessages(senderName, targetGroupId, startTime, endTime)
@@ -900,20 +883,16 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
         val quoteChain = (ancestors + message + descendants).distinctBy { it.id }
 
-        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
         val contextMessages = mutableListOf<Message>()
 
         // Add the quote chain (all referenced and referencing messages)
         contextMessages.addAll(quoteChain)
 
         // Only add nearby messages (+/- 2 hours) for the sender of the target (clicked) message
-        val msgTime = try { sdf.parse(message.timestamp) } catch (e: Exception) { null }
-        if (msgTime != null) {
-            val cal = Calendar.getInstance().apply { time = msgTime }
-            cal.add(Calendar.HOUR_OF_DAY, -2) // 2 hours before
-            val startTimeStr = sdf.format(cal.time)
-            cal.add(Calendar.HOUR_OF_DAY, 4) // 2 hours after (relative to startTimeStr)
-            val endTimeStr = sdf.format(cal.time)
+        val msgTimeMilli = try { TimeUtils.parseDefault(message.timestamp) } catch (e: Exception) { null }
+        if (msgTimeMilli != null) {
+            val startTimeStr = TimeUtils.formatDefault(msgTimeMilli - 2L * 60 * 60 * 1000)
+            val endTimeStr = TimeUtils.formatDefault(msgTimeMilli + 2L * 60 * 60 * 1000)
 
             val userMsgs = allMessages.filter {
                 it.senderName == message.senderName &&
@@ -996,6 +975,23 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         return weiboDao.getAllWeibosFlow()
             .map { entities -> entities.toTimelineStatuses() }
             .flowOn(Dispatchers.IO)
+    }
+
+    override fun getLocalTimelinePagingData(): Flow<PagingData<WeiboTimelineStatus>> {
+        val gson = Gson()
+        return Pager(
+            config = PagingConfig(
+                pageSize = TIMELINE_PAGE_SIZE,
+                initialLoadSize = TIMELINE_PAGE_SIZE,
+                prefetchDistance = 5,
+                enablePlaceholders = false
+            ),
+            pagingSourceFactory = { weiboDao.getWeibosPagingSource() }
+        ).flow.map { pagingData ->
+            pagingData.map { entity ->
+                gson.fromJson(entity.contentJson, WeiboTimelineStatus::class.java)
+            }
+        }.flowOn(Dispatchers.IO)
     }
 
     private fun List<WeiboEntity>.toTimelineStatuses(): List<WeiboTimelineStatus> {
@@ -1140,12 +1136,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
 
     private fun parseWeiboCreatedAt(createdAt: String?): Long {
         if (createdAt.isNullOrBlank()) return System.currentTimeMillis()
-        return try {
-            val parser = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US)
-            parser.parse(createdAt)?.time ?: System.currentTimeMillis()
-        } catch (e: Exception) {
-            System.currentTimeMillis()
-        }
+        return TimeUtils.parseWeiboCreatedAt(createdAt)
     }
 
     private fun prefetchImages(statuses: List<WeiboTimelineStatus>) {

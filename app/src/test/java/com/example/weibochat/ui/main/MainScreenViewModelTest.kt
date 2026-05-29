@@ -13,23 +13,27 @@ import com.example.weibochat.data.Message
 import com.example.weibochat.data.WeiboContact
 import com.example.weibochat.data.WeiboTimelineResponse
 import com.example.weibochat.data.WeiboTimelineStatus
+import androidx.paging.PagingData
 
 class MainScreenViewModelTest {
   @Test
   fun uiState_initiallyLoading() = runTest {
-    val viewModel = MainScreenViewModel(FakeMyModelRepository())
+    val fakeRepo = FakeMyModelRepository()
+    val viewModel = MainScreenViewModel(fakeRepo, fakeRepo, fakeRepo)
     assertEquals(viewModel.uiState.first(), MainScreenUiState.Loading)
   }
 
   @Test
   fun uiState_onItemSaved_isDisplayed() = runTest {
-    val viewModel = MainScreenViewModel(FakeMyModelRepository())
+    val fakeRepo = FakeMyModelRepository()
+    val viewModel = MainScreenViewModel(fakeRepo, fakeRepo, fakeRepo)
     assertEquals(viewModel.uiState.first(), MainScreenUiState.Loading)
   }
 }
 
 private class FakeMyModelRepository : DataRepository {
   override val allMessages: Flow<List<Message>> = flow { emit(emptyList()) }
+  override fun getMessagesPagingData(): Flow<PagingData<Message>> = flow { emit(PagingData.empty()) }
   override suspend fun sendMessage(content: String, senderName: String, contextId: Long?): Long = 0L
   override suspend fun getMessagesByContextId(contextId: Long): List<Message> = emptyList()
   override suspend fun getUserContextMessages(senderName: String, timestamp: String): List<Message> = emptyList()
@@ -69,6 +73,7 @@ private class FakeMyModelRepository : DataRepository {
   override fun markWeiboStatusAsRead(statusId: String) {}
   override fun getReadWeiboStatusIds(): Set<String> = emptySet()
   override fun getLocalTimeline(): Flow<List<WeiboTimelineStatus>> = kotlinx.coroutines.flow.flow { emit(emptyList()) }
+  override fun getLocalTimelinePagingData(): Flow<PagingData<WeiboTimelineStatus>> = kotlinx.coroutines.flow.flow { emit(PagingData.empty()) }
   override suspend fun syncNewTimeline(): Result<Unit> = Result.success(Unit)
   override suspend fun syncGap(gapId: Long): Result<Unit> = Result.success(Unit)
   override suspend fun loadMoreTimeline(): Result<Unit> = Result.success(Unit)

@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.paging.PagingSource
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -11,6 +12,9 @@ interface WeiboDao {
 
     @Query("SELECT * FROM weibos ORDER BY created_at_long DESC")
     fun getAllWeibosFlow(): Flow<List<WeiboEntity>>
+
+    @Query("SELECT * FROM weibos WHERE is_gap = 0 ORDER BY created_at_long DESC")
+    fun getWeibosPagingSource(): PagingSource<Int, WeiboEntity>
 
     @Query("SELECT * FROM weibos ORDER BY created_at_long DESC")
     suspend fun getAllWeibosList(): List<WeiboEntity>

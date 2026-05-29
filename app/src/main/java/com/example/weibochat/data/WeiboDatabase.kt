@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 @Database(
     entities = [MessageEntity::class, WeiboEntity::class],
     version = 8,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class WeiboDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao

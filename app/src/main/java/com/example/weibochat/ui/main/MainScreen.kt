@@ -36,6 +36,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavKey
+import androidx.paging.LoadState
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.collectAsLazyPagingItems
 import com.example.weibochat.data.Message
 import com.example.weibochat.data.WeiboTimelineStatus
 import com.example.weibochat.data.BlockedKeywordRule
@@ -43,14 +46,12 @@ import com.example.weibochat.data.MatchMode
 import com.example.weibochat.data.cleanWeiboHtmlText
 import kotlinx.coroutines.flow.distinctUntilChanged
 import com.example.weibochat.theme.*
-import com.example.weibochat.ui.weibo.ImagePreviewDialog
-import com.example.weibochat.ui.weibo.WeiboDetailDialog
 import com.example.weibochat.ui.weibo.WeiboTimelineViewModel
-import com.example.weibochat.ui.weibo.VideoPreviewDialog
-import com.example.weibochat.ui.weibo.WeiboMediaPreviewDialog
-import com.example.weibochat.ui.weibo.MediaItem
-import com.example.weibochat.ui.weibo.resolveImagePreview
-import com.example.weibochat.ui.weibo.resolveVideoPreview
+import com.example.weibochat.ui.weibo.components.WeiboDetailDialog
+import com.example.weibochat.ui.weibo.components.WeiboMediaPreviewDialog
+import com.example.weibochat.ui.weibo.components.MediaItem
+import com.example.weibochat.ui.weibo.components.resolveImagePreview
+import com.example.weibochat.ui.weibo.components.resolveVideoPreview
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.foundation.BorderStroke
@@ -83,9 +84,10 @@ fun MainScreen(
     timelineViewModel: WeiboTimelineViewModel
 ) {
     val context = LocalContext.current
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
     val contextMsgs by viewModel.contextMessages.collectAsStateWithLifecycle()
     val activeContextMsgId by viewModel.activeContextMessageId.collectAsStateWithLifecycle()
+    val pagedMessages = viewModel.messagesPagingData.collectAsLazyPagingItems()
+    val loadedMessages = pagedMessages.itemSnapshotList.items
     var showSettingsDialog by remember { mutableStateOf(false) }
 
     val isSyncingHistory by viewModel.isSyncingHistory.collectAsStateWithLifecycle()
@@ -268,8 +270,8 @@ fun MainScreen(
                 .padding(innerPadding)
                 .background(DarkBg)
         ) {
-            when (state) {
-                MainScreenUiState.Loading -> {
+            when {
+                pagedMessages.loadState.refresh is LoadState.Loading && pagedMessages.itemCount == 0 -> {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -277,21 +279,22 @@ fun MainScreen(
                         CircularProgressIndicator(color = AccentGreen)
                     }
                 }
-                is MainScreenUiState.Error -> {
+                pagedMessages.loadState.refresh is LoadState.Error -> {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
+                        val error = pagedMessages.loadState.refresh as LoadState.Error
                         Text(
-                            text = "加载错误: ${(state as MainScreenUiState.Error).throwable.message}",
+                            text = "加载错误: ${error.error.message}",
                             color = Color.Red
                         )
                     }
                 }
-                is MainScreenUiState.Success -> {
-                    val messages = (state as MainScreenUiState.Success).messages
+                else -> {
+                    val messages = loadedMessages
                     val isLoadingHistory by viewModel.isLoadingHistory.collectAsStateWithLifecycle()
-                    val cookie = remember(state) { viewModel.getCredentials().first }
+                    val cookie = remember { viewModel.getCredentials().first }
 
                     if (isSearching) {
                         val searchResults = remember(searchQuery, messages) {
@@ -359,7 +362,8 @@ fun MainScreen(
                         }
                     } else {
                         ChatContent(
-                            messages = messages,
+                            messages = pagedMessages,
+                            loadedMessages = messages,
                             cookie = cookie,
                             isLoadingHistory = isLoadingHistory,
                             listState = listState,
@@ -430,7 +434,7 @@ fun MainScreen(
 
             // Context Bottom Sheet
             contextMsgs?.let { msgs ->
-                val mainMessages = (state as? MainScreenUiState.Success)?.messages ?: emptyList()
+                val mainMessages = loadedMessages
                 ModalBottomSheet(
                     onDismissRequest = { viewModel.hideContext() },
                     containerColor = DarkBg,
@@ -765,7 +769,8 @@ fun MainScreen(
 
 @Composable
 fun ChatContent(
-    messages: List<Message>,
+    messages: LazyPagingItems<Message>,
+    loadedMessages: List<Message>,
     cookie: String,
     isLoadingHistory: Boolean,
     listState: LazyListState,
@@ -785,33 +790,31 @@ fun ChatContent(
     // Check if user is at the bottom of the message list
     val isAtBottom by remember {
         derivedStateOf {
-            val lastVisibleItem = listState.layoutInfo.visibleItemsInfo.lastOrNull()
-            lastVisibleItem != null && lastVisibleItem.index >= listState.layoutInfo.totalItemsCount - 2
+            listState.layoutInfo.totalItemsCount > 0 && listState.firstVisibleItemIndex <= 1
         }
     }
 
-    var lastMessageId by remember(groupId) { mutableStateOf<Long?>(messages.lastOrNull()?.id) }
+    var lastMessageId by remember(groupId) { mutableStateOf<Long?>(loadedMessages.firstOrNull()?.id) }
     var jumpBackIndex by remember(groupId) { mutableStateOf<Int?>(null) }
     var showNewMessageBadge by remember { mutableStateOf(false) }
 
-    // Detect scroll to top for loading history
-    val oldestMessageId = remember(messages) { messages.firstOrNull()?.id }
-    LaunchedEffect(listState.firstVisibleItemIndex, oldestMessageId) {
-        if (listState.firstVisibleItemIndex == 0 && oldestMessageId != null && oldestMessageId > 0 && !isLoadingHistory) {
+    val oldestMessageId = remember(loadedMessages) { loadedMessages.minByOrNull { it.id }?.id }
+    LaunchedEffect(listState.firstVisibleItemIndex, oldestMessageId, messages.itemCount) {
+        val nearOldestLoaded = messages.itemCount > 0 && listState.firstVisibleItemIndex >= messages.itemCount - 5
+        if (nearOldestLoaded && oldestMessageId != null && oldestMessageId > 0 && !isLoadingHistory) {
             onLoadOlderMessages(oldestMessageId)
         }
     }
 
     // Scroll memory initial load
-    LaunchedEffect(messages.isNotEmpty(), groupId) {
-        if (messages.isNotEmpty() && !initialScrollDone) {
+    LaunchedEffect(messages.itemCount, groupId) {
+        if (messages.itemCount > 0 && !initialScrollDone) {
             val savedPosition = repository.getReadPosition(groupId)
             if (savedPosition != null) {
                 val (index, offset) = savedPosition
                 listState.scrollToItem(index, offset)
             } else {
-                val target = if (isLoadingHistory) messages.size else (messages.size - 1).coerceAtLeast(0)
-                listState.scrollToItem(target)
+                listState.scrollToItem(0)
             }
             initialScrollDone = true
         }
@@ -829,11 +832,11 @@ fun ChatContent(
     }
 
     // Scroll to bottom when new messages are sent, or show new message badge if scrolled up
-    LaunchedEffect(messages.size) {
-        val newLastMsg = messages.lastOrNull()
+    LaunchedEffect(loadedMessages.firstOrNull()?.id) {
+        val newLastMsg = loadedMessages.firstOrNull()
         if (newLastMsg != null && lastMessageId != null && newLastMsg.id != lastMessageId) {
             if (newLastMsg.senderName == "我") {
-                listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                listState.animateScrollToItem(0)
                 showNewMessageBadge = false
             } else {
                 if (!isAtBottom) {
@@ -867,14 +870,36 @@ fun ChatContent(
                 .weight(1f)
                 .fillMaxWidth()
         ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
+                LazyColumn(
+                    state = listState,
+                    reverseLayout = true,
+                    modifier = Modifier
+                        .fillMaxSize()
                     .padding(horizontal = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 contentPadding = PaddingValues(top = 12.dp, bottom = 12.dp)
             ) {
+                items(
+                    count = messages.itemCount,
+                    key = { index -> messages.peek(index)?.id ?: "message_placeholder_$index" }
+                ) { index ->
+                    val message = messages[index]
+                    if (message != null) {
+                        MessageItem(
+                            message = message,
+                            cookie = cookie,
+                            messages = loadedMessages,
+                            listState = listState,
+                            coroutineScope = coroutineScope,
+                            onShowMessageContext = onShowMessageContext,
+                            onImageClick = onImageClick,
+                            onVideoClick = onVideoClick,
+                            onOpenWeiboStatus = onOpenWeiboStatus,
+                            onQuoteJump = onQuoteJump
+                        )
+                    }
+                }
+
                 if (isLoadingHistory) {
                     item(key = "loading_history_indicator") {
                         Box(
@@ -891,21 +916,6 @@ fun ChatContent(
                         }
                     }
                 }
-
-                items(messages, key = { it.id }) { message ->
-                    MessageItem(
-                        message = message,
-                        cookie = cookie,
-                        messages = messages,
-                        listState = listState,
-                        coroutineScope = coroutineScope,
-                        onShowMessageContext = onShowMessageContext,
-                        onImageClick = onImageClick,
-                        onVideoClick = onVideoClick,
-                        onOpenWeiboStatus = onOpenWeiboStatus,
-                        onQuoteJump = onQuoteJump
-                    )
-                }
             }
 
             // New Message Floating Badge
@@ -915,11 +925,11 @@ fun ChatContent(
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 16.dp)
                         .background(AccentGreen, RoundedCornerShape(20.dp))
-                        .clickable {
-                            coroutineScope.launch {
-                                listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
-                                showNewMessageBadge = false
-                            }
+	                        .clickable {
+	                            coroutineScope.launch {
+	                                listState.animateScrollToItem(0)
+	                                showNewMessageBadge = false
+	                            }
                         }
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
@@ -968,10 +978,10 @@ fun ChatContent(
                         .padding(bottom = 16.dp, end = 16.dp)
                         .background(BubbleBg, RoundedCornerShape(20.dp))
                         .border(0.5.dp, DividerGrey, RoundedCornerShape(20.dp))
-                        .clickable {
-                            coroutineScope.launch {
-                                listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
-                            }
+	                        .clickable {
+	                            coroutineScope.launch {
+	                                listState.animateScrollToItem(0)
+	                            }
                         }
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
@@ -1678,13 +1688,13 @@ fun QuoteBoxRecursive(
             currentLayerMsgId
         } else if (currentMessageId != null) {
             val key = "$currentMessageId|${layer.senderName}|${layer.cleanText}"
-            val cachedId = com.example.weibochat.data.quoteIdLookupCache[key]
+            val cachedId = com.example.weibochat.data.quoteIdLookupCache.get(key)
             if (cachedId != null) {
                 if (cachedId != -1L) cachedId else null
             } else {
                 val idx = findQuotedMessageIndex(messages, currentMessageId, layer.senderName, layer.cleanText)
                 val resolvedId = if (idx != -1) messages[idx].id else -1L
-                com.example.weibochat.data.quoteIdLookupCache[key] = resolvedId
+                com.example.weibochat.data.quoteIdLookupCache.put(key, resolvedId)
                 if (resolvedId != -1L) resolvedId else null
             }
         } else {

@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.RssFeed
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,9 +34,8 @@ import com.example.weibochat.data.WeiboContact
 import com.example.weibochat.ui.main.replaceWeiboShortcodes
 import com.example.weibochat.ui.weibo.WeiboTimelineScreen
 import com.example.weibochat.ui.weibo.WeiboTimelineViewModel
-import com.example.weibochat.ui.weibo.RandomRoamingOverlay
+import com.example.weibochat.ui.weibo.components.RandomRoamingOverlay
 import com.example.weibochat.ui.weibo.TimelineUiState
-import androidx.compose.material.icons.filled.Shuffle
 import com.example.weibochat.ui.weibo.WeiboWebScreen
 import com.example.weibochat.ui.weibo.WEIBO_SEARCH_URL
 import com.example.weibochat.ui.weibo.WeiboMobileCookieSync
@@ -124,7 +124,7 @@ fun GroupListScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = if (selectedTab == 0) "微博群聊列表" else if (showWeiboSearch) "微博搜索" else "最新微博",
+                        text = if (selectedTab == 0) "群聊" else if (showWeiboSearch) "微博搜索" else "微博",
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
@@ -164,7 +164,7 @@ fun GroupListScreen(
                                 contentPadding = PaddingValues(horizontal = 4.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Shuffle,
+                                    imageVector = Icons.Default.TravelExplore,
                                     contentDescription = "随机漫游",
                                     tint = Color(0xFFF97316),
                                     modifier = Modifier.size(20.dp)

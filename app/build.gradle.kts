@@ -47,7 +47,7 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -129,8 +129,21 @@ dependencies {
   // Room
   implementation(libs.androidx.room.runtime)
   implementation(libs.androidx.room.ktx)
+  implementation(libs.androidx.room.paging)
   ksp(libs.androidx.room.compiler)
+
+  // Paging
+  implementation(libs.androidx.paging.runtime)
+  implementation(libs.androidx.paging.compose)
 
   // Encrypted SharedPreferences
   implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+  // Koin Dependency Injection
+  implementation(libs.koin.android)
+  implementation(libs.koin.androidx.compose)
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }

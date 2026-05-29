@@ -9,7 +9,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.ui.NavDisplay
-import com.example.weibochat.data.AppRepositoryProvider
+import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
+import com.example.weibochat.data.DataRepository
 import com.example.weibochat.ui.main.MainScreen
 import com.example.weibochat.ui.main.MainScreenViewModel
 import com.example.weibochat.ui.login.LoginScreen
@@ -18,10 +20,10 @@ import com.example.weibochat.ui.weibo.WeiboTimelineViewModel
 
 @Composable
 fun MainNavigation() {
-  val context = LocalContext.current.applicationContext
-  val repository = remember { AppRepositoryProvider.get(context) }
-  val mainViewModel: MainScreenViewModel = viewModel { MainScreenViewModel(repository) }
-  val timelineViewModel: WeiboTimelineViewModel = viewModel { WeiboTimelineViewModel(repository) }
+  val repository: DataRepository = koinInject()
+  val mainViewModel: MainScreenViewModel = koinViewModel()
+  val timelineViewModel: WeiboTimelineViewModel = koinViewModel()
+
   
   val credentials = remember { repository.getCredentials() }
   val startDestination = remember {

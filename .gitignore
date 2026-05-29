@@ -41,3 +41,7 @@ signing/
 # Local screenshots
 screencap*.png
 weibo_*.png
+
+# AI
+.agents
+skills-lock.json

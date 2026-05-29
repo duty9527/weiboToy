@@ -2,9 +2,13 @@ package com.example.weibochat.ui.main
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.weibochat.data.DataRepository
 import com.example.weibochat.data.Message
 import com.example.weibochat.data.BlockedKeywordRule
+import com.example.weibochat.data.repository.MessageRepository
+import com.example.weibochat.data.repository.AuthRepository
+import com.example.weibochat.data.repository.SettingRepository
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -15,13 +19,20 @@ sealed interface MainScreenUiState {
     data class Success(val messages: List<Message>) : MainScreenUiState
 }
 
-class MainScreenViewModel(private val dataRepository: DataRepository) : ViewModel() {
+class MainScreenViewModel(
+    private val messageRepository: MessageRepository,
+    private val authRepository: AuthRepository,
+    private val settingRepository: SettingRepository
+) : ViewModel() {
 
     val uiState: StateFlow<MainScreenUiState> =
-        dataRepository.allMessages
+        messageRepository.allMessages
             .map<List<Message>, MainScreenUiState> { MainScreenUiState.Success(it) }
             .catch { emit(MainScreenUiState.Error(it)) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), MainScreenUiState.Loading)
+
+    val messagesPagingData: Flow<PagingData<Message>> =
+        messageRepository.getMessagesPagingData().cachedIn(viewModelScope)
 
     private val _contextMessages = MutableStateFlow<List<Message>?>(null)
     val contextMessages: StateFlow<List<Message>?> = _contextMessages.asStateFlow()
@@ -40,13 +51,13 @@ class MainScreenViewModel(private val dataRepository: DataRepository) : ViewMode
 
     fun sendMessage(content: String) {
         viewModelScope.launch {
-            dataRepository.sendMessage(content, senderName = "我", contextId = 1)
+            messageRepository.sendMessage(content, senderName = "我", contextId = 1)
         }
     }
 
     fun showContext(contextId: Long) {
         viewModelScope.launch {
-            val msgs = dataRepository.getMessagesByContextId(contextId)
+            val msgs = messageRepository.getMessagesByContextId(contextId)
             _contextMessages.value = msgs
         }
     }
@@ -54,7 +65,7 @@ class MainScreenViewModel(private val dataRepository: DataRepository) : ViewMode
     fun showMessageContext(message: Message) {
         viewModelScope.launch {
             _activeContextMessageId.value = message.id
-            val msgs = dataRepository.getMessageContext(message)
+            val msgs = messageRepository.getMessageContext(message)
             _contextMessages.value = msgs
         }
     }
@@ -65,42 +76,42 @@ class MainScreenViewModel(private val dataRepository: DataRepository) : ViewMode
     }
 
     fun saveCredentials(cookie: String, groupId: String) {
-        dataRepository.saveCredentials(cookie, groupId)
+        authRepository.saveCredentials(cookie, groupId)
     }
 
     fun getCredentials(): Pair<String, String> {
-        return dataRepository.getCredentials()
+        return authRepository.getCredentials()
     }
 
     fun getBlockedKeywordsString(): String {
-        return dataRepository.getBlockedKeywordsString()
+        return settingRepository.getBlockedKeywordsString()
     }
 
     fun saveBlockedKeywords(keywords: String) {
-        dataRepository.saveBlockedKeywords(keywords)
+        settingRepository.saveBlockedKeywords(keywords)
     }
 
     fun getBlockedKeywordRules(): List<BlockedKeywordRule> {
-        return dataRepository.getBlockedKeywordRules()
+        return settingRepository.getBlockedKeywordRules()
     }
 
     fun saveBlockedKeywordRules(rules: List<BlockedKeywordRule>) {
-        dataRepository.saveBlockedKeywordRules(rules)
+        settingRepository.saveBlockedKeywordRules(rules)
     }
 
     fun getBlockedUsersString(): String {
-        return dataRepository.getBlockedUsersString()
+        return settingRepository.getBlockedUsersString()
     }
 
     fun saveBlockedUsers(users: String) {
-        dataRepository.saveBlockedUsers(users)
+        settingRepository.saveBlockedUsers(users)
     }
 
     fun loadOlderMessages(oldestMid: Long) {
         if (_isLoadingHistory.value) return
         viewModelScope.launch {
             _isLoadingHistory.value = true
-            dataRepository.fetchOlderMessages(oldestMid)
+            messageRepository.fetchOlderMessages(oldestMid)
             delay(800)
             _isLoadingHistory.value = false
         }
@@ -112,7 +123,7 @@ class MainScreenViewModel(private val dataRepository: DataRepository) : ViewMode
             _isSyncingHistory.value = true
             _syncResultCount.value = null
             try {
-                val count = dataRepository.syncMessagesUntil(targetTimeMillis)
+                val count = messageRepository.syncMessagesUntil(targetTimeMillis)
                 _syncResultCount.value = count
             } catch (e: Exception) {
                 android.util.Log.e("WeiboChat", "Sync history failed", e)

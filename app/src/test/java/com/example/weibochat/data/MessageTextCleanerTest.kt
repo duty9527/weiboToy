@@ -2,7 +2,12 @@ package com.example.weibochat.data
 
 import junit.framework.TestCase.assertEquals
 import org.junit.Test
-import com.example.weibochat.ui.weibo.parseWeiboHtmlText
+import com.example.weibochat.ui.weibo.components.parseWeiboHtmlText
+import com.example.weibochat.ui.weibo.components.parseWeiboRepostChain
+import com.example.weibochat.ui.weibo.components.parseMarkdownBlocks
+import com.example.weibochat.ui.weibo.components.MarkdownBlock
+import com.example.weibochat.ui.weibo.components.TableAlign
+import com.example.weibochat.ui.weibo.components.WeiboRepostChainItem
 
 class MessageTextCleanerTest {
     @Test
@@ -110,33 +115,33 @@ class MessageTextCleanerTest {
             ```
         """.trimIndent()
         
-        val blocks = com.example.weibochat.ui.weibo.parseMarkdownBlocks(raw)
+        val blocks = parseMarkdownBlocks(raw)
         
         assertEquals(5, blocks.size)
         
         // Block 1: Header
-        val h1 = blocks[0] as com.example.weibochat.ui.weibo.MarkdownBlock.Header
+        val h1 = blocks[0] as MarkdownBlock.Header
         assertEquals(1, h1.level)
         assertEquals("Header 1", h1.text)
         
         // Block 2: Paragraph
-        val p = blocks[1] as com.example.weibochat.ui.weibo.MarkdownBlock.Paragraph
+        val p = blocks[1] as MarkdownBlock.Paragraph
         assertEquals("Some normal text here.", p.text)
         
         // Block 3: Blockquote
-        val q = blocks[2] as com.example.weibochat.ui.weibo.MarkdownBlock.Blockquote
+        val q = blocks[2] as MarkdownBlock.Blockquote
         assertEquals(2, q.lines.size)
         assertEquals("A blockquote line 1", q.lines[0])
         assertEquals("A blockquote line 2", q.lines[1])
         
         // Block 4: BulletList
-        val list = blocks[3] as com.example.weibochat.ui.weibo.MarkdownBlock.BulletList
+        val list = blocks[3] as MarkdownBlock.BulletList
         assertEquals(2, list.items.size)
         assertEquals("List item 1", list.items[0])
         assertEquals("List item 2", list.items[1])
         
         // Block 5: CodeBlock
-        val code = blocks[4] as com.example.weibochat.ui.weibo.MarkdownBlock.CodeBlock
+        val code = blocks[4] as MarkdownBlock.CodeBlock
         assertEquals("kotlin", code.language)
         assertEquals("fun test() {}", code.content)
     }
@@ -192,10 +197,10 @@ class MessageTextCleanerTest {
             | Cell 4 | Cell 5 | Cell 6 |
         """.trimIndent()
         
-        val blocks = com.example.weibochat.ui.weibo.parseMarkdownBlocks(raw)
+        val blocks = parseMarkdownBlocks(raw)
         
         assertEquals(1, blocks.size)
-        val table = blocks[0] as com.example.weibochat.ui.weibo.MarkdownBlock.Table
+        val table = blocks[0] as MarkdownBlock.Table
         
         // Assert headers
         assertEquals(3, table.headers.size)
@@ -205,9 +210,9 @@ class MessageTextCleanerTest {
         
         // Assert alignments
         assertEquals(3, table.alignments.size)
-        assertEquals(com.example.weibochat.ui.weibo.TableAlign.LEFT, table.alignments[0])
-        assertEquals(com.example.weibochat.ui.weibo.TableAlign.CENTER, table.alignments[1])
-        assertEquals(com.example.weibochat.ui.weibo.TableAlign.RIGHT, table.alignments[2])
+        assertEquals(TableAlign.LEFT, table.alignments[0])
+        assertEquals(TableAlign.CENTER, table.alignments[1])
+        assertEquals(TableAlign.RIGHT, table.alignments[2])
         
         // Assert rows
         assertEquals(2, table.rows.size)
@@ -395,5 +400,87 @@ class MessageTextCleanerTest {
         assertEquals("谢谢！", reply?.text)
         assertEquals("实战期货的程序员", reply?.user?.screen_name)
         assertEquals(6, reply?.like_count)
+    }
+
+    @Test
+    fun parseWeiboRepostChain_handlesNewlinesInUsernames() {
+        val raw = """
+            遵//@他们叫我冰箱：
+            混进来的内鬼一
+            盈//@阿喵炸号啦:哪里
+            -//@馮偉文:你深圳放就算
+            了，顺德你特么放陶陶居？？//@月刊勇者
+            KuMa君:不是陶陶居莲香楼也配？//@米芋说:
+            草//@韩大狗Jr:ai不ai先放一边，你顺德那么多
+            重量级美食结果把陶陶居和莲香楼放到封面上
+            是什么意思?
+        """.trimIndent()
+
+        val (mainContent, chain) = parseWeiboRepostChain(raw)
+
+        assertEquals("遵", mainContent)
+        assertEquals(6, chain.size)
+
+        assertEquals("他们叫我冰箱", chain[0].username)
+        assertEquals("混进来的内鬼一\n盈", chain[0].htmlText)
+
+        assertEquals("阿喵炸号啦", chain[1].username)
+        assertEquals("哪里\n-", chain[1].htmlText)
+
+        assertEquals("馮偉文", chain[2].username)
+        assertEquals("你深圳放就算\n了，顺德你特么放陶陶居？？", chain[2].htmlText)
+
+        assertEquals("月刊勇者KuMa君", chain[3].username)
+        assertEquals("不是陶陶居莲香楼也配？", chain[3].htmlText)
+
+        assertEquals("米芋说", chain[4].username)
+        assertEquals("草", chain[4].htmlText)
+
+        assertEquals("韩大狗Jr", chain[5].username)
+        assertEquals("ai不ai先放一边，你顺德那么多\n重量级美食结果把陶陶居和莲香楼放到封面上\n是什么意思?", chain[5].htmlText)
+    }
+
+    @Test
+    fun parseWeiboRepostChain_handlesHtmlAnchorAfterSlashes() {
+        val raw = """
+            <span class="url-icon"><img alt="[doge]" src="doge.png" /></span>//<a href='/n/他们叫我冰箱'>@他们叫我冰箱</a>:<span class="url-icon"><img alt="[泪奔]" src="tear.png" /></span>//<a href='/n/阿喵炸号啦'>@阿喵炸号啦</a>:哪里混进来的内鬼
+        """.trimIndent()
+
+        val (mainContent, chain) = parseWeiboRepostChain(raw)
+
+        assertEquals(
+            "<span class=\"url-icon\"><img alt=\"[doge]\" src=\"doge.png\" /></span>",
+            mainContent
+        )
+        assertEquals(2, chain.size)
+        assertEquals("他们叫我冰箱", chain[0].username)
+        assertEquals("<span class=\"url-icon\"><img alt=\"[泪奔]\" src=\"tear.png\" /></span>", chain[0].htmlText)
+        assertEquals("阿喵炸号啦", chain[1].username)
+        assertEquals("哪里混进来的内鬼", chain[1].htmlText)
+    }
+
+    @Test
+    fun parseWeiboRepostChain_combinedChainExtraction() {
+        val rawHtml = "遵//@他们叫我冰箱:混进来的内鬼一"
+        val retweetText = "混进来的内鬼一"
+        
+        val (mainHtml, statusChain) = parseWeiboRepostChain(rawHtml)
+        val (retweetMain, retweetChainList) = parseWeiboRepostChain(retweetText)
+        
+        val list = mutableListOf<WeiboRepostChainItem>()
+        list.addAll(statusChain)
+        if (retweetChainList.isNotEmpty()) {
+            if (retweetMain.isNotBlank()) {
+                list.add(WeiboRepostChainItem("原作者", retweetMain))
+            }
+            for (i in 0 until retweetChainList.size - 1) {
+                list.add(retweetChainList[i])
+            }
+        }
+        
+        assertEquals("遵", mainHtml)
+        assertEquals(1, list.size)
+        assertEquals("他们叫我冰箱", list[0].username)
+        assertEquals("混进来的内鬼一", list[0].htmlText)
     }
 }

@@ -2,20 +2,23 @@ package com.example.weibochat.ui.weibo
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.weibochat.data.DataRepository
+import com.example.weibochat.data.repository.TimelineRepository
 import com.example.weibochat.data.DEFAULT_WEIBO_TIMELINE_LIST_ID
 import com.example.weibochat.data.WeiboTimelineStatus
 import com.example.weibochat.data.WeiboComment
 import com.example.weibochat.data.WeiboRepost
 import com.example.weibochat.data.WeiboAttitude
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+
 
 sealed interface TimelineUiState {
     object Loading : TimelineUiState
@@ -24,9 +27,10 @@ sealed interface TimelineUiState {
 }
 
 class WeiboTimelineViewModel(
-    private val repository: DataRepository,
-    private val listId: String = DEFAULT_WEIBO_TIMELINE_LIST_ID
+    private val repository: TimelineRepository
 ) : ViewModel() {
+    private val listId: String = DEFAULT_WEIBO_TIMELINE_LIST_ID
+
 
     private val _scrollToTopEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val scrollToTopEvents = _scrollToTopEvents.asSharedFlow()
@@ -53,20 +57,19 @@ class WeiboTimelineViewModel(
     private val _loadingGaps = MutableStateFlow<Set<Long>>(emptySet())
     val loadingGaps: StateFlow<Set<Long>> = _loadingGaps.asStateFlow()
 
-    private val timelineData: StateFlow<List<WeiboTimelineStatus>> =
-        repository.getLocalTimeline()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val timelinePagingData: Flow<PagingData<WeiboTimelineStatus>> =
+        repository.getLocalTimelinePagingData().cachedIn(viewModelScope)
+
+    private val _loadedStatuses = MutableStateFlow<List<WeiboTimelineStatus>>(emptyList())
 
     init {
         _readStatusIds.value = repository.getReadWeiboStatusIds()
-        viewModelScope.launch {
-            timelineData.collect { statuses ->
-                if (statuses.isNotEmpty()) {
-                    _uiState.value = TimelineUiState.Success(statuses)
-                } else if (!_isRefreshing.value && _uiState.value is TimelineUiState.Loading) {
-                    refresh()
-                }
-            }
+    }
+
+    fun updateLoadedStatuses(statuses: List<WeiboTimelineStatus>) {
+        _loadedStatuses.value = statuses
+        if (statuses.isNotEmpty()) {
+            _uiState.value = TimelineUiState.Success(statuses)
         }
     }
 
@@ -81,7 +84,7 @@ class WeiboTimelineViewModel(
         viewModelScope.launch {
             val state = _uiState.value
             if (state is TimelineUiState.Success) {
-                state.statuses.forEach { status ->
+                _loadedStatuses.value.forEach { status ->
                     val id = status.idstr ?: status.id?.toString()
                     if (id != null && status.raw_text?.startsWith("__GAP__:") != true) {
                         repository.markWeiboStatusAsRead(id)
@@ -156,6 +159,20 @@ class WeiboTimelineViewModel(
         val canLoadMore: Boolean = false
     )
 
+    private val _statusComments = MutableStateFlow<Map<String, List<WeiboComment>>>(emptyMap())
+    val statusComments: StateFlow<Map<String, List<WeiboComment>>> = _statusComments.asStateFlow()
+
+    fun loadCommentsForStatus(statusId: String) {
+        if (statusId.isBlank() || _statusComments.value.containsKey(statusId)) return
+        viewModelScope.launch {
+            val response = repository.fetchWeiboComments(statusId, null, 0)
+            if (response?.ok == 1) {
+                val list = response.data?.data.orEmpty()
+                _statusComments.value = _statusComments.value + (statusId to list)
+            }
+        }
+    }
+
     private val _detailTab = MutableStateFlow(DetailTab.COMMENT)
     val detailTab: StateFlow<DetailTab> = _detailTab.asStateFlow()
 
@@ -173,6 +190,9 @@ class WeiboTimelineViewModel(
 
     private val _detailAttitudes = MutableStateFlow<List<WeiboAttitude>>(emptyList())
     val detailAttitudes: StateFlow<List<WeiboAttitude>> = _detailAttitudes.asStateFlow()
+
+    private val _detailStatus = MutableStateFlow<WeiboTimelineStatus?>(null)
+    val detailStatus: StateFlow<WeiboTimelineStatus?> = _detailStatus.asStateFlow()
 
     private val _isDetailCommentsLoading = MutableStateFlow(false)
     val isDetailCommentsLoading: StateFlow<Boolean> = _isDetailCommentsLoading.asStateFlow()
@@ -216,6 +236,7 @@ class WeiboTimelineViewModel(
         activeDetailStatusId = statusId
         _detailTab.value = DetailTab.COMMENT
 
+        _detailStatus.value = null
         _detailComments.value = emptyList()
         _detailReposts.value = emptyList()
         _detailAttitudes.value = emptyList()
@@ -230,6 +251,12 @@ class WeiboTimelineViewModel(
         repostHasMore = true
         attitudeHasMore = true
 
+        viewModelScope.launch {
+            val status = repository.fetchWeiboStatus(statusId)
+            if (activeDetailStatusId == statusId && status != null) {
+                _detailStatus.value = status
+            }
+        }
         loadComments(statusId, reset = true)
     }
 
@@ -400,7 +427,7 @@ class WeiboTimelineViewModel(
         viewModelScope.launch {
             val currentState = _uiState.value
             if (currentState is TimelineUiState.Success) {
-                val statuses = currentState.statuses.toMutableList()
+                val statuses = _loadedStatuses.value.toMutableList()
                 val index = statuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
                 if (index != -1) {
                     val oldStatus = statuses[index]
@@ -413,6 +440,7 @@ class WeiboTimelineViewModel(
                         attitudes_count = newCount
                     )
                     statuses[index] = newStatus
+                    _loadedStatuses.value = statuses
                     _uiState.value = TimelineUiState.Success(statuses)
 
                     val success = if (newLiked) {
@@ -424,10 +452,11 @@ class WeiboTimelineViewModel(
                     if (!success) {
                         val revertState = _uiState.value
                         if (revertState is TimelineUiState.Success) {
-                            val revertStatuses = revertState.statuses.toMutableList()
+                            val revertStatuses = _loadedStatuses.value.toMutableList()
                             val revertIndex = revertStatuses.indexOfFirst { (it.idstr ?: it.id?.toString()) == statusId }
                             if (revertIndex != -1) {
                                 revertStatuses[revertIndex] = oldStatus
+                                _loadedStatuses.value = revertStatuses
                                 _uiState.value = TimelineUiState.Success(revertStatuses)
                             }
                         }

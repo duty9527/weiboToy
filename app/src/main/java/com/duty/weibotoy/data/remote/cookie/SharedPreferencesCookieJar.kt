@@ -20,11 +20,19 @@ class SharedPreferencesCookieJar(private val context: Context) : okhttp3.CookieJ
     private fun loadFromPrefs() {
         try {
             val json = sharedPrefs.getString("cookies_json", null)
-            if (!json.isNullOrBlank()) {
-                val type = object : com.google.gson.reflect.TypeToken<Map<String, List<SerializableCookie>>>() {}.type
-                val serialized: Map<String, List<SerializableCookie>> = gson.fromJson(json, type)
-                serialized.forEach { (host, list) ->
-                    cookieStore[host] = list.map { it.toOkHttpCookie() }.toMutableList()
+            if (json.isNullOrBlank()) return
+            val type = object : com.google.gson.reflect.TypeToken<Map<String, List<SerializableCookie>>>() {}.type
+            val serialized: Map<String, List<SerializableCookie>> = gson.fromJson(json, type)
+            serialized.forEach { (host, list) ->
+                val prefsCookies = list.map { it.toOkHttpCookie() }
+                val current = cookieStore.getOrPut(host) { mutableListOf() }
+                prefsCookies.forEach { prefCookie ->
+                    val idx = current.indexOfFirst { it.name == prefCookie.name && it.path == prefCookie.path }
+                    if (idx >= 0) {
+                        current[idx] = prefCookie
+                    } else {
+                        current.add(prefCookie)
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -105,6 +113,11 @@ class SharedPreferencesCookieJar(private val context: Context) : okhttp3.CookieJ
             if (sinaComCookies.isNotEmpty()) {
                 mergeCookies("login.sina.com.cn", sinaComCookies)
             }
+            // 清理过期 cookie
+            val currentTime = System.currentTimeMillis()
+            cookieStore.values.forEach { list ->
+                list.removeAll { it.expiresAt < currentTime }
+            }
             promoteAuthCookiesForWeiboHosts()
             saveToPrefs()
         }
@@ -158,24 +171,25 @@ class SharedPreferencesCookieJar(private val context: Context) : okhttp3.CookieJ
 
     @Synchronized
     override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<okhttp3.Cookie>) {
-        loadFromPrefs()
-        mergeCookies(url.host, cookies)
-
-        cookieStore[url.host]?.removeAll { it.expiresAt < System.currentTimeMillis() }
+        val host = url.host
+        val current = cookieStore.getOrPut(host) { mutableListOf() }
+        cookies.forEach { newCookie ->
+            current.removeAll { it.name == newCookie.name && it.path == newCookie.path }
+            current.add(newCookie)
+        }
+        current.removeAll { it.expiresAt < System.currentTimeMillis() }
         saveToPrefs()
     }
 
     @Synchronized
     override fun loadForRequest(url: okhttp3.HttpUrl): List<okhttp3.Cookie> {
-        loadFromPrefs()
         promoteAuthCookiesForWeiboHosts()
         val validCookies = mutableListOf<okhttp3.Cookie>()
         val currentTime = System.currentTimeMillis()
 
-        cookieStore.forEach { (host, list) ->
-            list.removeAll { it.expiresAt < currentTime }
+        cookieStore.forEach { (_, list) ->
             list.forEach { cookie ->
-                if (cookie.matches(url)) {
+                if (cookie.expiresAt >= currentTime && cookie.matches(url)) {
                     validCookies.add(cookie)
                 }
             }

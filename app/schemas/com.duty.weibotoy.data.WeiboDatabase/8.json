@@ -1,0 +1,206 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 8,
+    "identityHash": "bec18aaafe2e8b256db94dd861a2b199",
+    "entities": [
+      {
+        "tableName": "messages",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `timestamp` TEXT NOT NULL DEFAULT '', `sender_name` TEXT NOT NULL DEFAULT '', `group_suffix` TEXT NOT NULL DEFAULT '', `content` TEXT NOT NULL DEFAULT '', `context_id` INTEGER, `image_url` TEXT, `link_title` TEXT, `link_desc` TEXT, `link_img` TEXT, `link_url` TEXT, `file_url` TEXT, `file_name` TEXT, `group_id` TEXT NOT NULL DEFAULT '4761715839862414', `parent_msg_id` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "timestamp",
+            "columnName": "timestamp",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "senderName",
+            "columnName": "sender_name",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "groupSuffix",
+            "columnName": "group_suffix",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "content",
+            "columnName": "content",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "''"
+          },
+          {
+            "fieldPath": "contextId",
+            "columnName": "context_id",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "imageUrl",
+            "columnName": "image_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "linkTitle",
+            "columnName": "link_title",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "linkDesc",
+            "columnName": "link_desc",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "linkImg",
+            "columnName": "link_img",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "linkUrl",
+            "columnName": "link_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fileUrl",
+            "columnName": "file_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fileName",
+            "columnName": "file_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "groupId",
+            "columnName": "group_id",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'4761715839862414'"
+          },
+          {
+            "fieldPath": "parentMsgId",
+            "columnName": "parent_msg_id",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_messages_group_id_timestamp",
+            "unique": false,
+            "columnNames": [
+              "group_id",
+              "timestamp"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_group_id_timestamp` ON `${TABLE_NAME}` (`group_id`, `timestamp`)"
+          },
+          {
+            "name": "index_messages_parent_msg_id",
+            "unique": false,
+            "columnNames": [
+              "parent_msg_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_parent_msg_id` ON `${TABLE_NAME}` (`parent_msg_id`)"
+          }
+        ]
+      },
+      {
+        "tableName": "weibos",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `created_at_long` INTEGER NOT NULL, `content_json` TEXT NOT NULL, `is_read` INTEGER NOT NULL DEFAULT 0, `is_gap` INTEGER NOT NULL DEFAULT 0, `gap_since_id` INTEGER, `gap_max_id` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAtLong",
+            "columnName": "created_at_long",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentJson",
+            "columnName": "content_json",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isRead",
+            "columnName": "is_read",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "isGap",
+            "columnName": "is_gap",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "gapSinceId",
+            "columnName": "gap_since_id",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "gapMaxId",
+            "columnName": "gap_max_id",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_weibos_created_at_long",
+            "unique": false,
+            "columnNames": [
+              "created_at_long"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_weibos_created_at_long` ON `${TABLE_NAME}` (`created_at_long`)"
+          },
+          {
+            "name": "index_weibos_is_gap",
+            "unique": false,
+            "columnNames": [
+              "is_gap"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_weibos_is_gap` ON `${TABLE_NAME}` (`is_gap`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'bec18aaafe2e8b256db94dd861a2b199')"
+    ]
+  }
+}

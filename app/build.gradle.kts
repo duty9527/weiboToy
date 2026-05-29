@@ -21,10 +21,10 @@ base {
 }
 
 android {
-    namespace = "com.example.weibochat"
+    namespace = "com.duty.weibotoy"
     compileSdk = 36
     defaultConfig {
-        applicationId = "com.example.weibochat"
+        applicationId = "com.duty.weibotoy"
         minSdk = 24
         targetSdk = 36
         versionCode = 1

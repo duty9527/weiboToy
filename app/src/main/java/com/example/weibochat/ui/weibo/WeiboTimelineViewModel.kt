@@ -9,10 +9,12 @@ import com.example.weibochat.data.WeiboComment
 import com.example.weibochat.data.WeiboRepost
 import com.example.weibochat.data.WeiboAttitude
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 sealed interface TimelineUiState {
@@ -51,16 +53,18 @@ class WeiboTimelineViewModel(
     private val _loadingGaps = MutableStateFlow<Set<Long>>(emptySet())
     val loadingGaps: StateFlow<Set<Long>> = _loadingGaps.asStateFlow()
 
+    private val timelineData: StateFlow<List<WeiboTimelineStatus>> =
+        repository.getLocalTimeline()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     init {
         _readStatusIds.value = repository.getReadWeiboStatusIds()
         viewModelScope.launch {
-            repository.getLocalTimeline().collect { statuses ->
+            timelineData.collect { statuses ->
                 if (statuses.isNotEmpty()) {
                     _uiState.value = TimelineUiState.Success(statuses)
-                } else {
-                    if (!_isRefreshing.value && _uiState.value is TimelineUiState.Loading) {
-                        refresh()
-                    }
+                } else if (!_isRefreshing.value && _uiState.value is TimelineUiState.Loading) {
+                    refresh()
                 }
             }
         }

@@ -9,10 +9,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -117,15 +117,16 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         return getCredentials().first
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     override val allMessages: Flow<List<Message>> =
-        combine(
-            activeGroupIdFlow,
-            _databaseUpdates.onStart { emit(Unit) }
-        ) { groupId, _ -> groupId }
-            .map { groupId ->
-                if (groupId != null) queryMessagesByGroupId(groupId) else emptyList()
+        activeGroupIdFlow.flatMapLatest { groupId ->
+            if (groupId != null) {
+                messageDao.getMessagesByGroupIdFlow(groupId, MESSAGE_LOAD_LIMIT)
+                    .map { entities -> filterBlocked(entities.asReversed().map { it.toMessage() }) }
+            } else {
+                flowOf(emptyList())
             }
-            .flowOn(Dispatchers.IO)
+        }.flowOn(Dispatchers.IO)
 
     private suspend fun findParentMessageId(
         groupId: String,
@@ -969,11 +970,35 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
     }
 
     override fun getLocalTimeline(): Flow<List<WeiboTimelineStatus>> {
-        return _weiboDatabaseUpdates.onStart { emit(Unit) }
-            .map {
-                queryLocalWeibos()
-            }
+        return weiboDao.getAllWeibosFlow()
+            .map { entities -> entities.toTimelineStatuses() }
             .flowOn(Dispatchers.IO)
+    }
+
+    private fun List<WeiboEntity>.toTimelineStatuses(): List<WeiboTimelineStatus> {
+        val gson = Gson()
+        return mapNotNull { entity ->
+            if (entity.isGap == 1) {
+                WeiboTimelineStatus(
+                    id = entity.id,
+                    idstr = entity.id.toString(),
+                    created_at = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US).format(Date(entity.createdAtLong)),
+                    raw_text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
+                    text_raw = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
+                    text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
+                    source = null, isLongText = false, user = null,
+                    pic_ids = null, pic_infos = null, retweeted_status = null,
+                    page_info = null, reposts_count = null, comments_count = null, attitudes_count = null
+                )
+            } else {
+                try {
+                    gson.fromJson(entity.contentJson, WeiboTimelineStatus::class.java)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    null
+                }
+            }
+        }
     }
 
     override suspend fun syncNewTimeline(): Result<Unit> = withContext(Dispatchers.IO) {
@@ -1081,33 +1106,6 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         }
     }
 
-    private suspend fun queryLocalWeibos(): List<WeiboTimelineStatus> {
-        val entities = weiboDao.getAllWeibosList()
-        val gson = Gson()
-        return entities.mapNotNull { entity ->
-            if (entity.isGap == 1) {
-                WeiboTimelineStatus(
-                    id = entity.id,
-                    idstr = entity.id.toString(),
-                    created_at = SimpleDateFormat("EEE MMM dd HH:mm:ss Z yyyy", Locale.US).format(Date(entity.createdAtLong)),
-                    raw_text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
-                    text_raw = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
-                    text = "__GAP__:${entity.gapSinceId}:${entity.gapMaxId}",
-                    source = null, isLongText = false, user = null,
-                    pic_ids = null, pic_infos = null, retweeted_status = null,
-                    page_info = null, reposts_count = null, comments_count = null, attitudes_count = null
-                )
-            } else {
-                try {
-                    gson.fromJson(entity.contentJson, WeiboTimelineStatus::class.java)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    null
-                }
-            }
-        }
-    }
-
     private suspend fun insertWeiboStatuses(statuses: List<WeiboTimelineStatus>) {
         val gson = Gson()
         val entities = statuses.mapNotNull { status ->
@@ -1140,11 +1138,9 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             status.user?.profile_image_url?.let { urls.add(it) }
             status.pics?.forEach { pic ->
                 pic.large?.url?.let { urls.add(it) }
-                pic.url?.let { urls.add(it) }
             }
             status.retweeted_status?.pics?.forEach { pic ->
                 pic.large?.url?.let { urls.add(it) }
-                pic.url?.let { urls.add(it) }
             }
         }
         try {

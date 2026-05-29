@@ -479,10 +479,15 @@ class WeiboApiClient(private val context: Context) {
         .registerTypeAdapterFactory(WeiboCommentListTypeAdapterFactory())
         .create()
 
-
+    // Session hydration cache - avoid redundant HTTP requests before every API call
+    private var lastTimelineHydrationTime = 0L
+    private var lastGroupChatHydrationTime = 0L
+    private val hydrationCacheMs = 5 * 60 * 1000L // 5 minutes
 
     fun clearSession() {
         cookieJar.clear()
+        lastTimelineHydrationTime = 0L
+        lastGroupChatHydrationTime = 0L
     }
 
     fun getStoredCookieString(seedCookie: String = ""): String {
@@ -813,6 +818,8 @@ class WeiboApiClient(private val context: Context) {
     }
 
     private fun hydrateWebGroupChatSession() {
+        val now = System.currentTimeMillis()
+        if (now - lastGroupChatHydrationTime < hydrationCacheMs) return
         val pageUrl = "https://api.weibo.com/chat"
         val request = Request.Builder()
             .url(pageUrl)
@@ -830,10 +837,13 @@ class WeiboApiClient(private val context: Context) {
                     val location = response.header("Location").orEmpty()
                     if (location.contains("passport") || location.contains("login") || location.contains("signin")) {
                         android.util.Log.w("WeiboApiClient", "Web group chat session request redirected to login page: $location")
+                        return
                     }
                 } else if (!response.isSuccessful) {
                     android.util.Log.w("WeiboApiClient", "Web group chat session request failed: code=$code, url=$pageUrl")
+                    return
                 }
+                lastGroupChatHydrationTime = System.currentTimeMillis()
             }
         } catch (e: Exception) {
             android.util.Log.w("WeiboApiClient", "Web group chat session request failed", e)
@@ -1184,6 +1194,8 @@ class WeiboApiClient(private val context: Context) {
     }
 
     private fun hydrateTimelineMobileSession(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastTimelineHydrationTime < hydrationCacheMs) return true
         val pageUrl = "https://m.weibo.cn/"
         val request = Request.Builder()
             .url(pageUrl)
@@ -1205,6 +1217,7 @@ class WeiboApiClient(private val context: Context) {
                     android.util.Log.w("WeiboApiClient", "Timeline mobile page session failed: code=${response.code}, url=$finalUrl")
                     return false
                 }
+                lastTimelineHydrationTime = System.currentTimeMillis()
                 return true
             }
         } catch (e: Exception) {

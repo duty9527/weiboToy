@@ -4,12 +4,16 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE group_id = :groupId ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getMessagesByGroupIdDesc(groupId: String, limit: Int = 5000): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE group_id = :groupId ORDER BY timestamp DESC LIMIT :limit")
+    fun getMessagesByGroupIdFlow(groupId: String, limit: Int = 5000): Flow<List<MessageEntity>>
 
     @Query("SELECT * FROM messages WHERE group_id = :groupId AND timestamp < :beforeTimestamp ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getOlderMessages(groupId: String, beforeTimestamp: String, limit: Int = 500): List<MessageEntity>

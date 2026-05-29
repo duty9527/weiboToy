@@ -48,6 +48,10 @@ data class WeiboUrlObject(
     val status: WeiboUrlStatus?
 )
 
+data class WeiboMessageAnnotations(
+    val video_pic_fid: Long? = null
+)
+
 data class WeiboMessage(
     val id: Long,
     val content: String,
@@ -56,7 +60,8 @@ data class WeiboMessage(
     val from_user: WeiboUser?,
     val media_type: Int? = null,
     val fids: List<Long>? = null,
-    val url_objects: List<WeiboUrlObject>? = null
+    val url_objects: List<WeiboUrlObject>? = null,
+    val annotations: WeiboMessageAnnotations? = null
 )
 
 data class WeiboGroupMessagesResponse(
@@ -88,7 +93,8 @@ private data class WeiboMobileGroupMessage(
     val media_type: Int?,
     val type: Int?,
     val fids: List<Long>?,
-    val url_objects: List<WeiboUrlObject>?
+    val url_objects: List<WeiboUrlObject>?,
+    val annotations: WeiboMessageAnnotations? = null
 )
 
 private data class WeiboMobileGroupUser(
@@ -886,7 +892,8 @@ class WeiboApiClient(private val context: Context) {
                 ),
                 media_type = msg.media_type,
                 fids = msg.fids,
-                url_objects = msg.url_objects
+                url_objects = msg.url_objects,
+                annotations = msg.annotations
             )
         }
 

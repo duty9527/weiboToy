@@ -245,6 +245,18 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
             fileName = wm.content
         }
 
+        if (wm.media_type == 10) {
+            if (!wm.fids.isNullOrEmpty()) {
+                val fid = wm.fids.first()
+                fileUrl = "https://upload.api.weibo.com/2/mss/msget?fid=$fid&source=209678993"
+                fileName = "video.mp4"
+            }
+            val coverFid = wm.annotations?.video_pic_fid
+            if (coverFid != null) {
+                imageUrl = "https://upload.api.weibo.com/2/mss/msget_thumbnail?fid=$coverFid&high=480&width=480&size=480,480&source=209678993"
+            }
+        }
+
         val parentId = findParentMessageId(groupId, wm.content, wm.id)
 
         return MessageEntity(
@@ -271,6 +283,7 @@ class DefaultDataRepository(private val context: Context) : DataRepository {
         if (wm.media_type == 1 && !wm.fids.isNullOrEmpty() && existing.imageUrl.isNullOrEmpty()) return true
         if (!wm.url_objects.isNullOrEmpty() && existing.linkTitle.isNullOrEmpty()) return true
         if (wm.media_type == 5 && !wm.fids.isNullOrEmpty() && existing.fileUrl.isNullOrEmpty()) return true
+        if (wm.media_type == 10 && existing.fileUrl.isNullOrEmpty()) return true
         return false
     }
 

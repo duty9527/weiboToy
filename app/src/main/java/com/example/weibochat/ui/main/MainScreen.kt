@@ -46,6 +46,13 @@ import com.example.weibochat.theme.*
 import com.example.weibochat.ui.weibo.ImagePreviewDialog
 import com.example.weibochat.ui.weibo.WeiboDetailDialog
 import com.example.weibochat.ui.weibo.WeiboTimelineViewModel
+import com.example.weibochat.ui.weibo.VideoPreviewDialog
+import com.example.weibochat.ui.weibo.WeiboMediaPreviewDialog
+import com.example.weibochat.ui.weibo.MediaItem
+import com.example.weibochat.ui.weibo.resolveImagePreview
+import com.example.weibochat.ui.weibo.resolveVideoPreview
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
@@ -116,7 +123,7 @@ fun MainScreen(
     
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
-    var activePreviewImages by remember { mutableStateOf<Pair<List<String>, Int>?>(null) }
+    var activeMediaPreview by remember { mutableStateOf<Pair<List<MediaItem>, Int>?>(null) }
     var activeDetailStatus by remember { mutableStateOf<WeiboTimelineStatus?>(null) }
     var isDetailLoading by remember { mutableStateOf(false) }
 
@@ -365,7 +372,21 @@ fun MainScreen(
                                 val imageUrls = imageMessages.map { getOriginalImageUrl(it.imageUrl!!) }
                                 val clickedOriginalUrl = getOriginalImageUrl(clickedUrl)
                                 val index = imageUrls.indexOf(clickedOriginalUrl).coerceAtLeast(0)
-                                activePreviewImages = Pair(imageUrls, index)
+                                val mediaList = imageUrls.map { MediaItem(thumbnailUrl = it, largeUrl = it) }
+                                activeMediaPreview = Pair(mediaList, index)
+                            },
+                            onVideoClick = { url ->
+                                val parts = url.split("##")
+                                val videoUrl = parts[0]
+                                val coverUrl = parts.getOrNull(1)
+                                val item = MediaItem(
+                                    thumbnailUrl = coverUrl ?: "",
+                                    largeUrl = coverUrl ?: "",
+                                    isVideo = true,
+                                    isLivePhoto = url.endsWith("##live"),
+                                    videoSrc = videoUrl
+                                )
+                                activeMediaPreview = Pair(listOf(item), 0)
                             },
                             onOpenWeiboStatus = ::openWeiboStatus,
                             repository = repository,
@@ -373,13 +394,13 @@ fun MainScreen(
                         )
                     }
 
-                    // Big Image Fullscreen Overlay using Weibo's ImagePreviewDialog
-                    activePreviewImages?.let { (urls, index) ->
-                        ImagePreviewDialog(
-                            imageUrls = urls,
+                    // Unified Weibo Media Preview Dialog
+                    activeMediaPreview?.let { (mediaList, index) ->
+                        WeiboMediaPreviewDialog(
+                            mediaItems = mediaList,
                             initialIndex = index,
-                            cookie = cookie,
-                            onDismiss = { activePreviewImages = null }
+                            repository = repository,
+                            onDismiss = { activeMediaPreview = null }
                         )
                     }
                 }
@@ -394,9 +415,11 @@ fun MainScreen(
                         activeDetailStatus = null
                         isDetailLoading = false
                     },
-                    onImageClick = { index, urls -> activePreviewImages = Pair(urls, index) },
+                    onImageClick = { index, urls ->
+                        activeMediaPreview = resolveImagePreview(status, index, urls)
+                    },
                     onVideoClick = { url ->
-                        runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
+                        activeMediaPreview = resolveVideoPreview(status, url)
                     },
                     onWebClick = { url ->
                         runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
@@ -751,6 +774,7 @@ fun ChatContent(
     onShowMessageContext: (Message) -> Unit,
     onLoadOlderMessages: (Long) -> Unit,
     onImageClick: (String) -> Unit,
+    onVideoClick: (String) -> Unit,
     onOpenWeiboStatus: (String) -> Unit,
     repository: com.example.weibochat.data.DataRepository,
     groupId: String
@@ -877,6 +901,7 @@ fun ChatContent(
                         coroutineScope = coroutineScope,
                         onShowMessageContext = onShowMessageContext,
                         onImageClick = onImageClick,
+                        onVideoClick = onVideoClick,
                         onOpenWeiboStatus = onOpenWeiboStatus,
                         onQuoteJump = onQuoteJump
                     )
@@ -1090,6 +1115,7 @@ fun MessageItem(
     coroutineScope: CoroutineScope,
     onShowMessageContext: (Message) -> Unit,
     onImageClick: (String) -> Unit,
+    onVideoClick: (String) -> Unit,
     onOpenWeiboStatus: (String) -> Unit,
     onQuoteJump: (Int, Int) -> Unit
 ) {
@@ -1180,7 +1206,89 @@ fun MessageItem(
         val hasWeiboCard = weiboStatusId != null
         val hasExternalLink = normalizedLinkUrl != null && !hasWeiboCard
 
-        if (message.imageUrl != null) {
+        val isVideo = message.imageUrl != null && message.fileUrl != null && message.fileName == "video.mp4"
+
+        if (isVideo) {
+            // Video message bubble
+            var imageAspectRatio by remember(message.imageUrl) { mutableStateOf<Float?>(null) }
+            Box(
+                modifier = Modifier
+                    .background(BubbleBg, RoundedCornerShape(8.dp))
+                    .padding(4.dp)
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.clickable {
+                        onVideoClick("${message.fileUrl}##${message.imageUrl}")
+                    }
+                ) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(message.imageUrl)
+                            .addHeader("Cookie", cookie)
+                            .addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                            .addHeader("Referer", "https://weibo.com/")
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = "视频封面",
+                        onState = { state ->
+                            if (state is AsyncImagePainter.State.Success) {
+                                val intrinsicWidth = state.painter.intrinsicSize.width
+                                val intrinsicHeight = state.painter.intrinsicSize.height
+                                if (intrinsicWidth > 0 && intrinsicHeight > 0) {
+                                    imageAspectRatio = intrinsicWidth / intrinsicHeight
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .then(
+                                if (imageAspectRatio != null) {
+                                    val ratio = imageAspectRatio!!
+                                    val maxWidth = 240.dp
+                                    val maxHeight = 240.dp
+                                    if (ratio > 1f) {
+                                        Modifier
+                                            .width(maxWidth)
+                                            .height(maxWidth / ratio)
+                                    } else {
+                                        Modifier
+                                            .height(maxHeight)
+                                            .width(maxHeight * ratio)
+                                    }
+                                } else {
+                                    Modifier
+                                        .widthIn(max = 240.dp)
+                                        .heightIn(max = 240.dp)
+                                }
+                            )
+                            .background(Color.DarkGray, RoundedCornerShape(6.dp)),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                    )
+                    
+                    // Dark semi-transparent overlay to make the play button pop and look professional
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(Color.Black.copy(alpha = 0.2f), RoundedCornerShape(6.dp))
+                    )
+                    
+                    // Play icon in the center
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(Color.Black.copy(alpha = 0.5f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "播放视频",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
+            }
+        } else if (message.imageUrl != null) {
             // Image message bubble
             var imageAspectRatio by remember(message.imageUrl) { mutableStateOf<Float?>(null) }
             Box(
